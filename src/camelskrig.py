@@ -112,18 +112,24 @@ class CamelsLoader:
         return results.tolist()  # Convert back to a list of tuples
 
 class CamelsKrig:
-    def __init__(self, data, config_path):
+    def __init__(self, data, config_path, year, month, day):
         """
         Initialize the kriging analysis with parameters from the configuration file.
 
         :param data: List of (lon, lat, streamflow) tuples.
         :param config_path: Path to the YAML configuration file.
+        :param year: Year of the data.
+        :param month: Month of the data.
+        :param day: Day of the data.
         """
-        self.data = np.array(data, dtype=float)  # Ensure all values are floats
+        self.data = np.array(data, dtype=float)
         self.lons = self.data[:, 0]
         self.lats = self.data[:, 1]
         self.values = self.data[:, 2]
-        self.geod = Geod(ellps="WGS84")  # Define a WGS84 ellipsoid for distance calculations
+        self.year = year
+        self.month = month
+        self.day = day
+        self.geod = Geod(ellps="WGS84")
 
         # Load configuration settings
         self.config = self._load_config(config_path)
@@ -196,13 +202,13 @@ class CamelsKrig:
         num_points = len(self.lons)
         distances = []
         differences = []
-        
+
         for i in range(num_points):
             for j in range(i + 1, num_points):
                 _, _, distance_m = self.geod.inv(self.lons[i], self.lats[i], self.lons[j], self.lats[j])
                 distances.append(distance_m / 1000)  # Convert meters to kilometers
                 differences.append((self.values[i] - self.values[j]) ** 2)
-        
+
         distances = np.array(distances)
         differences = np.array(differences)
 
@@ -212,12 +218,15 @@ class CamelsKrig:
         semi_variance = [differences[bin_indices == i].mean() for i in range(self.variogram_bins)]
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
+        # Format the date
+        date_str = f"{self.year}-{self.month:02d}-{self.day:02d}"
+
         # Plot variogram
         plt.figure(figsize=(8, 5))
         plt.scatter(bin_centers, semi_variance, c="blue", label="Empirical Variogram")
         plt.xlabel("Distance (km)")
         plt.ylabel("Semi-variance")
-        plt.title(f"Empirical Variogram ({self.variogram_model} model)")
+        plt.title(f"Empirical Variogram ({self.variogram_model} model) - {date_str}")
         plt.legend()
         plt.show()
 
