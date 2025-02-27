@@ -1,0 +1,17 @@
+geopandas
+rasterio
+shapely
+fiona
+pyproj
+pykrige
+gstools
+scikit-learn
+scipy
+matplotlib
+seaborn
+folium
+numpy
+pandas
+xarray
+jupyterlab
+ipython
