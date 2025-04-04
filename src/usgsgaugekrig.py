@@ -8,110 +8,124 @@ import scipy.spatial.distance as dist
 from pykrige.ok import OrdinaryKriging
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import random
+import dataretrieval.nwis as nwis
 
-class CamelsLoader:
+class USGSLoader:
 
     def __init__(self, config_path):
-        """
-        Initialize the loader using a configuration file.
-        
-        :param config_path: Path to the YAML configuration file.
-        """
         self.config = self._load_config(config_path)
         self.metadata_file = self.config["data"]["metadata_file"]
-        self.data_dir = self.config["data"]["data_dir"]
+        self.site_list_file = self.config["data"].get("site_list_file", None)
+        print(self.site_list_file)
         self.date_format = self.config["settings"]["date_format"]
+        self.add_random_sites = self.config["settings"].get("add_random_sites", 0)
         self.gauge_metadata = self._load_gauge_metadata()
 
     def _load_config(self, config_path):
-        """Loads the configuration from the YAML file."""
         with open(config_path, "r") as f:
             return yaml.safe_load(f)
 
     def _load_gauge_metadata(self):
-        """Loads the gauge metadata from the configured file."""
-        df = pd.read_csv(self.metadata_file, sep=";", dtype={"gauge_id": str})
-        df.set_index("gauge_id", inplace=True)  # Index by gauge ID for easy lookup
+        df = pd.read_csv(self.metadata_file, comment="#", dtype={"site_no": str})
+        df = df.rename(columns={
+            "site_no": "gauge_id",
+            "dec_lat_va": "gauge_lat",
+            "dec_long_va": "gauge_lon",
+            "drain_area_va": "area_km2"
+        })
+
+        df = df[["gauge_id", "gauge_lat", "gauge_lon", "area_km2"]]
+        df.dropna(inplace=True)
+
+        if self.site_list_file and os.path.exists(self.site_list_file):
+            with open(self.site_list_file, "r") as f:
+                site_ids = [line.strip() for line in f if line.strip()]
+
+            df = df[df["gauge_id"].isin(site_ids)]
+
+        # Add random sites
+        if self.add_random_sites > 0:
+            all_metadata = pd.read_csv(self.metadata_file, comment="#", dtype={"site_no": str})
+            all_metadata = all_metadata.rename(columns={
+                "site_no": "gauge_id",
+                "dec_lat_va": "gauge_lat",
+                "dec_long_va": "gauge_lon",
+                "drain_area_va": "area_km2"
+            })
+            all_metadata = all_metadata[["gauge_id", "gauge_lat", "gauge_lon", "area_km2"]].dropna()
+            current_sites = set(df["gauge_id"])
+            candidate_sites = all_metadata[~all_metadata["gauge_id"].isin(current_sites)]
+            sample_size = min(self.add_random_sites, len(candidate_sites))
+            random_sites = candidate_sites.sample(n=sample_size, random_state=42)
+            df = pd.concat([df, random_sites])
+
+        df.set_index("gauge_id", inplace=True)
+
         return df
 
-    def _find_gauge_file(self, gauge_id):
-        """Finds the file containing the streamflow data for the given gauge_id."""
-        for subdir in os.listdir(self.data_dir):
-            subdir_path = os.path.join(self.data_dir, subdir)
-            if os.path.isdir(subdir_path):
-                file_path = os.path.join(subdir_path, f"{gauge_id}_streamflow_qc.txt")
-                if os.path.exists(file_path):
-                    return file_path
-        return None  # File not found
-
     def get_streamflow(self, year, month, day):
-        """
-        Retrieves (longitude, latitude, normalized streamflow) for all gauges on a specified date.
-        
-        :param year: Year (int)
-        :param month: Month (int)
-        :param day: Day (int)
-        :return: List of tuples [(lon, lat, streamflow in mm/day), ...]
-        """
+        """Get (lon, lat, streamflow mm/day) for each gauge on a given date."""
         results = []
-        target_date = f"{year} {month:02d} {day:02d}"  # Match format in streamflow file
+        date = pd.Timestamp(year=year, month=month, day=day)
+        date_str = date.strftime("%Y-%m-%d")
 
         for gauge_id, row in self.gauge_metadata.iterrows():
-            file_path = self._find_gauge_file(gauge_id)
-            if not file_path:
-                continue  # Skip if no file found
+            try:
+                # Use dataretrieval to get daily discharge (parameterCd 00060 = discharge)
+                df = nwis.get_record(
+                    sites=gauge_id,
+                    service="dv",
+                    start=date_str,
+                    end=date_str,
+                    parameterCd="00060"
+                )
 
-            with open(file_path, "r") as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if len(parts) < 5:
-                        continue
-                    if " ".join(parts[1:4]) == target_date:
-                        lon, lat = row["gauge_lon"], row["gauge_lat"]
-                        streamflow_cfs = float(parts[4])
+                if not df.empty:
+                    # Look for discharge value, column name ends with "00060_Mean"
+                    discharge_col = [col for col in df.columns if "00060" in col and "Mean" in col]
+                    if discharge_col:
+                        streamflow_cfs = df.iloc[0][discharge_col[0]]
 
-                        # Get basin area (use area_geospa_fabric instead of area_gages2)
-                        area_m2 = row["area_geospa_fabric"] * 1e6  # Convert km² to m²
-                        if area_m2 > 0:  # Avoid division by zero
-                            # Use correct conversion formula
-                            streamflow_mm = (streamflow_cfs * 0.0283168 * 86400 / area_m2) * 1000
-                            results.append((lon, lat, streamflow_mm, gauge_id))
+                        # Convert cfs → mm/day
+                        area_km2 = row["area_km2"]
+                        area_m2 = area_km2 * 1e6
+                        streamflow_mm = (streamflow_cfs * 0.0283168 * 86400 / area_m2) * 1000
 
-                        break  # Move to the next gauge once data is found
+                        results.append((
+                            row["gauge_lon"],
+                            row["gauge_lat"],
+                            streamflow_mm,
+                            gauge_id
+                        ))
 
-        # Convert results to a structured NumPy array
+            except Exception as e:
+                print(f"Failed for gauge {gauge_id}: {e}")
+                continue
+
         if results:
-            dtype = [("lon", float), ("lat", float), ("streamflow", float), ("gauge_id", "U10")]
+            dtype = [("lon", float), ("lat", float), ("streamflow", float), ("gauge_id", "U15")]
             results = np.array(results, dtype=dtype)
+            streamflows = results["streamflow"]
 
-            streamflows = results["streamflow"]  # Extract streamflow values
+            print(f"\nSummary for {date_str}")
+            print(f"  - Observations: {len(streamflows)}")
+            print(f"  - Min: {np.min(streamflows):.2f}, Max: {np.max(streamflows):.2f}, Mean: {np.mean(streamflows):.2f}")
 
-            print(f"Summary Statistics for {year}-{month:02d}-{day:02d}:")
-            print(f"  - Number of observations: {len(streamflows)}")
-            print(f"  - Min streamflow: {np.min(streamflows):.2f} mm/day")
-            print(f"  - Max streamflow: {np.max(streamflows):.2f} mm/day")
-            print(f"  - Mean streamflow: {np.mean(streamflows):.2f} mm/day")
-            print(f"  - Std deviation: {np.std(streamflows):.2f} mm/day")
-            
-            # Identify and print negative values
-            negative_indices = streamflows < 0
-            num_negatives = np.sum(negative_indices)
+            neg_vals = results[streamflows < 0]
+            if len(neg_vals):
+                print(f"  - ⚠️ Negative values found ({len(neg_vals)}):")
+                for row in neg_vals:
+                    print(f"    {row['gauge_id']} @ ({row['lat']:.4f}, {row['lon']:.4f}) = {row['streamflow']:.2f}")
 
-            if num_negatives > 0:
-                print(f"  - WARNING: {num_negatives} negative values detected!")
-                print("  - Locations of negative values (gauge_id, lon, lat, streamflow):")
-                for row in results[negative_indices]:
-                    print(f"    - Gauge {row['gauge_id']}: ({row['lon']:.4f}, {row['lat']:.4f}) -> {row['streamflow']:.2f} mm/day")
-
-            # Remove negative values
-            results = results[~negative_indices]
+            results = results[streamflows >= 0]
 
         else:
-            print(f"No streamflow data found for {year}-{month:02d}-{day:02d}.")
+            print(f"No data for {date_str}")
 
-        return results.tolist()  # Convert back to a list of tuples
+        return results.tolist()
 
-class CamelsKrig:
+class USGSKrig:
     def __init__(self, data, config_path, year, month, day):
         """
         Initialize the kriging analysis with parameters from the configuration file.
