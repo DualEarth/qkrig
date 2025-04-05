@@ -1,0 +1,18 @@
+data:
+  metadata_file: "/Users/jmframe/data/CAMELS_US/camels_attributes_v2.0/camels_topo.txt"
+  data_dir: "/Users/jmframe/data/model_output_for_analysis"
+  model_file: "daymet_lstm2.csv"
+  
+settings:
+  date_format: "%Y %m %d"
+
+kriging:
+  grid_size: 100
+  variogram_model: "spherical"
+  variogram_bins: 25
+  nugget: 1 # Set to 0 for exact interpolation, increase slightly for smoothness
+  exact_values: False  # Ensure interpolation matches known points
+  nlags: 25  # More lags improve variogram fitting
+  weight: False  # Prioritize small distances for better sensitivity
+  range: 400  # Variogram range in meters (optional)
+  sill: 10
