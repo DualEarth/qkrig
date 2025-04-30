@@ -5,8 +5,9 @@ channels:
 dependencies:
   # Core Python
   - python=3.10  # Adjust version as needed
-  
+
   # Geospatial Libraries
+  - cartopy
   - geopandas  # Reads shapefiles, handles geospatial data
   - rasterio  # Work with raster data
   - shapely  # Geometry operations for vector data
@@ -32,3 +33,6 @@ dependencies:
   # Jupyter for interactive workflows
   - jupyterlab  # Interactive notebooks
   - ipython  # Enhanced Python shell
+
+  # Hydrology data retrieval
+  - dataretrieval
