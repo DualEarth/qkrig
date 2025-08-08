@@ -3,12 +3,17 @@
 data:
   metadata_file: "/Users/jmframe/qkrig/data/usgs_site_info.csv"
   data_dir: "/Users/jmframe/data/usgskrig"
-  site_list_file: "/Users/jmframe/qkrig/data/list_22_camels_basins_NoLeaf.txt"
-
+#  site_list_file: "/Users/jmframe/qkrig/data/list_22_camels_basins_NoLeaf.txt"
+  site_list_file: "/Users/jmframe/qkrig/data/list_671_camels_basins.txt"
 settings:
   date_format: "%Y %m %d"
-  add_random_sites: 100
-
+  add_random_sites: 10
+  concurrency: 16
+  max_retries: 3
+  retry_backoff_seconds: 0.75
+  min_area_km2: 0
+  bbox: [-125, 24, -66, 50]
+plot_config: "/Users/jmframe/qkrig/configs/plot_config.yaml"
 kriging:
   grid_size: 100
   variogram_model: "spherical"

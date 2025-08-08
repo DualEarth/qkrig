@@ -6,7 +6,7 @@ data:
   land_mask: "/Users/jmframe/qkrig/data/conus_land_mask.npy"
 settings:
   date_format: "%Y %m %d"
-
+plot_config: "/Users/jmframe/qkrig/configs/plot_config.yaml"
 kriging:
   grid_size: 100
   variogram_model: "spherical"

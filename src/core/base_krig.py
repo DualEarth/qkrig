@@ -1,5 +1,6 @@
 # base_krig.py
 
+import os
 import numpy as np
 import yaml
 from pyproj import Geod
@@ -24,6 +25,13 @@ class BaseKrig:
             self.config = yaml.safe_load(f)
 
         kcfg = self.config.get("kriging", {})
+        self.plot_config_path = self.config.get("plot_config", "plot config error")
+
+        land_mask_path = self.config["data"].get("land_mask")
+        if land_mask_path and os.path.exists(land_mask_path):
+            self.land_mask = np.load(land_mask_path)
+        else:
+            self.land_mask = None
 
         # Validate config entries
         required_keys = ["grid_size", "variogram_model", "variogram_bins"]
