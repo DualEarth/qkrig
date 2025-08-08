@@ -1,6 +1,8 @@
+# ./configs/simulationkrig.yaml
+
 data:
   metadata_file: "/Users/jmframe/data/CAMELS_US/camels_attributes_v2.0/camels_topo.txt"
-  data_dir: "/Users/jmframe/data/model_output_for_analysis"
+  data_dir: "/Users/jmframe/data/model_output_for_analysis/csv_model_sims_from_mass_balance_papers"
   model_file: "daymet_lstm2.csv"
   
 settings:

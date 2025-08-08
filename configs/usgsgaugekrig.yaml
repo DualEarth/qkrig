@@ -1,11 +1,13 @@
+# ./configs/usgsgaugekrig.yaml
+
 data:
-  metadata_file: "/Users/jmframe/qkrig_usgs/data/usgs_site_info.csv"
+  metadata_file: "/Users/jmframe/qkrig/data/usgs_site_info.csv"
   data_dir: "/Users/jmframe/data/usgskrig"
-  site_list_file: "/Users/jmframe/qkrig_usgs/data/list_22_camels_basins_NoLeaf.txt"
+  site_list_file: "/Users/jmframe/qkrig/data/list_22_camels_basins_NoLeaf.txt"
 
 settings:
   date_format: "%Y %m %d"
-  add_random_sites: 0
+  add_random_sites: 100
 
 kriging:
   grid_size: 100
