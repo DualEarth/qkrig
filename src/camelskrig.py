@@ -1,3 +1,5 @@
+# ./src/camelskrig.py
+
 import os
 import yaml
 import pandas as pd
@@ -21,6 +23,7 @@ class CamelsLoader:
         self.metadata_file = self.config["data"]["metadata_file"]
         self.data_dir = self.config["data"]["data_dir"]
         self.date_format = self.config["settings"]["date_format"]
+        self.land_mask = self.config["data"]["land_mask"]
         self.gauge_metadata = self._load_gauge_metadata()
 
     def _load_config(self, config_path):
@@ -235,6 +238,10 @@ class CamelsKrig:
         Plots the kriging interpolated values while ensuring the interpolated values 
         are bounded by the observed data range.
         """
+
+        land_mask_path = "."
+        land_mask = np.load(land_mask_path)  # shape: (H, W)
+
         if self.z_interp is None:
             raise RuntimeError("You must run compute_kriging() first!")
 

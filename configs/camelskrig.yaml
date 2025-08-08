@@ -1,7 +1,9 @@
+# ./configs/camelskrig.yaml
+
 data:
   metadata_file: "/Users/jmframe/data/CAMELS_US/camels_attributes_v2.0/camels_topo.txt"
   data_dir: "/Users/jmframe/data/CAMELS_US/usgs_streamflow"
-
+  land_mask: "/Users/jmframe/qkrig/data/conus_land_mask.npy"
 settings:
   date_format: "%Y %m %d"
 
