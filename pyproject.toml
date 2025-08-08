@@ -1,0 +1,20 @@
+[project]
+name = "qkrig"
+version = "0.1.0"
+description = "Streamflow kriging and visualization framework"
+authors = [{ name = "Your Name", email = "your@email.com" }]
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "pyproj",
+    "pykrige",
+    "scipy",
+    "cartopy",
+    "PyYAML",
+    "dataretrieval"
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

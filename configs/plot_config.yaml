@@ -1,0 +1,36 @@
+variogram:
+  figure_size: [8, 5]
+  color: "blue"
+  marker: "o"
+  label: "Empirical Variogram"
+  xlabel: "Distance (km)"
+  ylabel: "Semi-variance"
+  title_prefix: "Empirical Variogram"
+  font_size: 12
+  legend: true
+
+kriging_interpolation:
+  figure_size: [8, 6]
+  cmap: "coolwarm"
+  levels: 15
+  colorbar_label: "Interpolated Streamflow (mm/day)"
+  scatter:
+    cmap: "coolwarm"
+    s: 1
+    edgecolors: "none"
+    label: "Observed Data"
+  xlabel: "Longitude"
+  ylabel: "Latitude"
+  title_prefix: "Kriging Interpolation"
+  font_size: 12
+  legend: true
+
+kriging_error:
+  figure_size: [8, 6]
+  cmap: "viridis"
+  levels: 15
+  colorbar_label: "Kriging Error Variance"
+  xlabel: "Longitude"
+  ylabel: "Latitude"
+  title: "Kriging Error Variance Map"
+  font_size: 12
