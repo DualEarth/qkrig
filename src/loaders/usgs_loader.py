@@ -333,8 +333,8 @@ class USGSLoader(BaseLoader):
                     mm_day = (cfs * 0.0283168 * 86400.0 / area_m2) * 1000.0
 
                     # filter large negatives here; return None to drop
-                    if mm_day < -99:
-                        return (None, "Large_negative_flow", site_id)
+                    if mm_day < -69 or mm_day > 69:
+                        return (None, "Large_magnitude_flow", site_id)
 
                     return ((lon, lat, mm_day, site_id), "ok", site_id)
 

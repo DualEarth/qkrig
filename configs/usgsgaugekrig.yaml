@@ -4,10 +4,10 @@ data:
   metadata_file: "/Users/jmframe/qkrig/data/usgs_site_info.csv"
   data_dir: "/Users/jmframe/data/usgskrig"
 #  site_list_file: "/Users/jmframe/qkrig/data/list_22_camels_basins_NoLeaf.txt"
-  site_list_file: "/Users/jmframe/qkrig/data/list_671_camels_basins.txt"
+  site_list_file: "/Users/jmframe/qkrig/data/usgs_active_sites_Oct01_2024.txt"
 settings:
   date_format: "%Y %m %d"
-  add_random_sites: 10
+  add_random_sites: 0
   concurrency: 16
   max_retries: 3
   retry_backoff_seconds: 0.75
