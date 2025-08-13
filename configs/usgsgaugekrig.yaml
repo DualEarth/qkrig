@@ -25,3 +25,5 @@ kriging:
   weight: False  # Prioritize small distances for better sensitivity
   range: 400  # Variogram range in meters (optional)
   sill: 10
+exports:
+  directory: "/media/volume/ml_ngen/usgskrig/exports"   # where to write files

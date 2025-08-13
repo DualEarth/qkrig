@@ -42,23 +42,14 @@ def main():
     krig.plot_config_path = plot_cfg_path
 
     # Compute
+    krig.compute_semivariogram()
     krig.compute_kriging()
-
-    # 3) Plots (respect PlotConfig save/show flags)
-    try:
-        krig.plot_variogram()
-    except Exception as e:
-        print(f"Variogram plot skipped: {e}")
-
-    try:
-        krig.map_krig_interpolation()
-    except Exception as e:
-        print(f"Interpolation plot skipped: {e}")
-
-    try:
-        krig.map_krig_error_variance()
-    except Exception as e:
-        print(f"Error variance plot skipped: {e}")
+    krig.plot_variogram()
+    krig.map_krig_interpolation()
+    interp_path, vario_path = krig.export_all()
+    print("data exported to")
+    print(interp_path)
+    print(vario_path)
 
     return 0
 

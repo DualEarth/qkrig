@@ -12,16 +12,22 @@ variogram:
   title_prefix: "Empirical Variogram"
   font_size: 12
   legend: true
+  max_value: 2000
+  min_value: 0
+  ylog: true 
 
 kriging_interpolation:
+  render_mode: pcolormesh      # NEW: pcolormesh or contourf
+  norm: power                    # NEW: log | power | linear
+  power_gamma: 0.3             # NEW: only for norm: power (0.3-0.7 good)
   figure_size: [8, 6]
-  cmap: "coolwarm"
-  levels: 15
+  cmap: "GnBu"
+  levels: 60
   colorbar_label: "Interpolated Surface Runoff (mm/day)"
-  max_value: 30
-  min_value: 0
+  max_value: 40
+  min_value: 0.01
   scatter:
-    cmap: "coolwarm"
+    cmap: "GnBu"
     s: 1
     edgecolors: "none"
     label: "Observed Data"
@@ -30,6 +36,8 @@ kriging_interpolation:
   title_prefix: "Kriging Interpolation"
   font_size: 12
   legend: true
+  log_scale: true
+  log_scale_base: 2
 
 kriging_error:
   figure_size: [8, 6]

@@ -8,6 +8,7 @@ from cartopy.io import shapereader as shpreader
 from shapely.ops import unary_union
 from shapely.geometry import box
 from shapely import vectorized
+from matplotlib.colors import LogNorm, PowerNorm, BoundaryNorm
 
 class PlotConfig:
     def __init__(self, path=None):
@@ -26,6 +27,9 @@ class PlotConfig:
                 "ylabel": "Semi-variance",
                 "title_prefix": "Empirical Variogram",
                 "legend": True,
+                "min_value": None,   # y-axis lower bound
+                "max_value": None,   # y-axis upper bound
+                "ylog": False,       # log scale on y-axis
             },
             "kriging_interpolation": {
                 "figure_size": [8, 6],
@@ -34,6 +38,7 @@ class PlotConfig:
                 "colorbar_label": "Interpolated Streamflow (mm/day)",
                 "max_value": None,
                 "min_value": None,
+                "log_scale": False,
                 "scatter": {
                     "cmap": "coolwarm",
                     "s": 8,
@@ -74,6 +79,35 @@ class PlotConfig:
     def __getitem__(self, item):
         return self.cfg.get(item, {})
 
+
+
+def _get_conus_mask(krig):
+    """
+    Boolean mask (ny, nx) True==inside CONUS, False==outside.
+    """
+    ny, nx = krig.grid_lat.size, krig.grid_lon.size
+    glon = krig.grid_lon.astype(float).copy()
+    glon = ((glon + 180.0) % 360.0) - 180.0
+    glat = krig.grid_lat.astype(float)
+    xx, yy = np.meshgrid(glon, glat)
+
+    # Load US polygon and clip to CONUS bounds
+    shpfilename = shpreader.natural_earth(
+        resolution="50m", category="cultural", name="admin_0_countries"
+    )
+    geoms = [rec.geometry for rec in shpreader.Reader(shpfilename).records()
+             if rec.attributes.get("NAME") == "United States of America"]
+    if not geoms:
+        return None
+
+    usa_union = unary_union(geoms)
+
+    # Hard CONUS bbox: approx [-125, -66.5] lon, [24.5, 49.5] lat
+    conus_bbox = box(-125.0, 24.5, -66.5, 49.5)
+    conus_geom = usa_union.intersection(conus_bbox)
+
+    mask = vectorized.contains(conus_geom, xx, yy) | vectorized.touches(conus_geom, xx, yy)
+    return np.asarray(mask, dtype=bool)
 
 def _get_land_mask(krig):
     """
@@ -163,34 +197,13 @@ class VariogramPlotter:
         self.config = self.plot_cfg["variogram"]
 
     def plot(self):
-        distances, differences = [], []
-        num_points = len(self.krig.lons)
 
-        for i in range(num_points):
-            for j in range(i + 1, num_points):
-                _, _, d = self.krig.geod.inv(
-                    self.krig.lons[i], self.krig.lats[i],
-                    self.krig.lons[j], self.krig.lats[j]
-                )
-                distances.append(d / 1000.0)  # km
-                differences.append((self.krig.values[i] - self.krig.values[j]) ** 2)
+        if not self.krig.semivariogram_ready():
+            raise RuntimeError(
+                "Semivariogram not computed. Call `krig.compute_semivariogram(...)` before plotting."
+            )
 
-        distances = np.array(distances)
-        differences = np.array(differences)
-
-        if distances.size == 0:
-            raise ValueError("Not enough points to compute a variogram (need at least 2).")
-
-        bins = self.config.get("bins", getattr(self.krig, "variogram_bins", 25))
-        bin_edges = np.linspace(0, np.max(distances), bins + 1)
-        bin_indices = np.digitize(distances, bin_edges) - 1
-
-        semi_variance = []
-        for i in range(bins):
-            mask = (bin_indices == i)
-            semi_variance.append(differences[mask].mean() if np.any(mask) else np.nan)
-        semi_variance = np.array(semi_variance)
-        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        bin_centers, semi_variance = self.krig._semivar_cache
 
         plt.figure(figsize=self.config.get("figure_size", [8, 5]))
         plt.scatter(
@@ -203,8 +216,21 @@ class VariogramPlotter:
         title_prefix = self.config.get("title_prefix", "Empirical Variogram")
         date_str = f"{self.krig.year}-{self.krig.month:02d}-{self.krig.day:02d}"
         plt.title(f"{title_prefix} - {date_str}")
+
+        ymax_cfg = self.config.get("max_value", None)
+
+        if self.config.get("ylog", False):
+            # Avoid non-positive values on log scale
+            current_ymin, current_ymax = plt.ylim()
+            eps = 1e-12
+            # If min <= 0, bump slightly positive
+            if current_ymin <= 0:
+                current_ymin = eps
+            plt.ylim(bottom=current_ymin, top=ymax_cfg)
+            plt.yscale("log")
+
         if self.config.get("legend", True):
-            plt.legend()
+            plt.legend(loc="lower left")
         save_plots = self.plot_cfg.cfg.get("save_plots", False)
         show_plots = self.plot_cfg.cfg.get("show_plots", True)
         plots_dir = self.plot_cfg.cfg.get("plots_directory", "./plots")
@@ -231,47 +257,107 @@ class KrigingMapPlotter:
         if self.krig.z_interp is None:
             raise RuntimeError("compute_kriging() must be run before plotting interpolation.")
 
-        # Determine vmin/vmax from config (support both max_value/min_value and vmax/vmin)
-        data_min = float(np.min(self.krig.values))
-        data_max = float(np.max(self.krig.values))
-
         cfg = self.config_interp
+
+        # Observed bounds
+        data_min = float(np.nanmin(self.krig.values))
+        data_max = float(np.nanmax(self.krig.values))
+
+        # Config bounds
         vmin = cfg.get("min_value", cfg.get("vmin", None))
         vmax = cfg.get("max_value", cfg.get("vmax", None))
-
-        # If unset, fall back to observed range
         vmin = data_min if vmin is None else float(vmin)
         vmax = data_max if vmax is None else float(vmax)
-
-        # Safety: ensure vmin <= vmax
         if vmin > vmax:
             vmin, vmax = vmax, vmin
 
-        # Clip interpolated surface to [vmin, vmax]
+        # Clip surface
         z = np.clip(self.krig.z_interp, vmin, vmax)
 
-        # Apply land mask (True==land)
+        # Land mask (True==land)
         mask = _get_land_mask(self.krig)
         if mask is not None:
             z = np.ma.masked_where(~mask, z)
 
-        plt.figure(figsize=cfg.get("figure_size", [8, 6]))
-        cs = plt.contourf(
-            self.krig.grid_lon, self.krig.grid_lat, z,
-            levels=cfg.get("levels", 15),
-            cmap=cfg.get("cmap", "coolwarm"),
-            vmin=vmin, vmax=vmax,   # <- enforce color scale
-        )
-        plt.colorbar(cs, label=cfg.get("colorbar_label", "Interpolated Streamflow (mm/day)"))
+        # CONUS mask
+        conus_mask = _get_conus_mask(self.krig)
+        if conus_mask is not None:
+            z = np.ma.masked_where(~conus_mask, z)
 
+        # Pick normalization
+        # Back-compat: if log_scale is set, default to "log" unless user overrides "norm"
+        norm_name = cfg.get("norm", "log" if cfg.get("log_scale", False) else "linear").lower()
+        cmap = cfg.get("cmap", "viridis")
+
+        norm = None
+        eps = 1e-12
+
+        if norm_name == "log":
+            vmin_eff = max(vmin, eps)
+            z = np.ma.masked_where(z <= 0, z)
+            norm = LogNorm(vmin=vmin_eff, vmax=vmax)
+        elif norm_name == "power":
+            gamma = float(cfg.get("power_gamma", 0.5))  # <1 stretches low end
+            # PowerNorm works with non-negative values, allow zeros
+            vmin_eff = max(vmin, 0.0)
+            norm = PowerNorm(gamma=gamma, vmin=vmin_eff, vmax=vmax)
+        else:
+            norm = None  # linear; vmin/vmax passed to plotting call
+
+        # --- Render mode ---
+        render_mode = cfg.get("render_mode", "pcolormesh").lower()
+
+        plt.figure(figsize=cfg.get("figure_size", [8, 6]))
+
+        if render_mode == "pcolormesh":
+            # Continuous shading -> no “few colors” problem
+            pc = plt.pcolormesh(
+                self.krig.grid_lon, self.krig.grid_lat, z,
+                shading="auto",
+                cmap=cmap,
+                norm=norm,
+                vmin=None if norm is not None else vmin,
+                vmax=None if norm is not None else vmax,
+            )
+            cbar = plt.colorbar(pc, label=cfg.get("colorbar_label", "Interpolated Streamflow (mm/day)"))
+
+        else:  # "contourf"
+            levels_cfg = cfg.get("levels", 15)
+            levels = levels_cfg
+
+            # If log norm + int levels -> build log-spaced boundaries
+            if isinstance(levels_cfg, int) and norm_name == "log":
+                base = float(cfg.get("log_scale_base", 10.0))
+                start = np.log(max(vmin, eps)) / np.log(base)
+                stop  = np.log(vmax) / np.log(base)
+                if stop <= start:
+                    stop = start + 1.0
+                levels = np.logspace(start, stop, int(levels_cfg), base=base)
+                # Boundary norm to map bins to full colormap
+                norm = BoundaryNorm(levels, ncolors=plt.get_cmap(cmap).N, clip=True)
+
+            cs = plt.contourf(
+                self.krig.grid_lon, self.krig.grid_lat, z,
+                levels=levels,
+                cmap=cmap,
+                norm=norm,
+                vmin=None if norm is not None else vmin,
+                vmax=None if norm is not None else vmax,
+                extend="both",
+            )
+            cbar = plt.colorbar(cs, label=cfg.get("colorbar_label", "Interpolated Streamflow (mm/day)"))
+
+        # Observations (use same norm)
         scatter_cfg = cfg.get("scatter", {})
         plt.scatter(
             self.krig.lons, self.krig.lats, c=self.krig.values,
             s=scatter_cfg.get("s", 8),
-            cmap=scatter_cfg.get("cmap", "coolwarm"),
+            cmap=scatter_cfg.get("cmap", cmap),
             edgecolors=scatter_cfg.get("edgecolors", "none"),
             label=scatter_cfg.get("label", "Observed Data"),
-            vmin=vmin, vmax=vmax,   # <- match the scale
+            norm=norm,
+            vmin=None if norm is not None else vmin,
+            vmax=None if norm is not None else vmax,
         )
 
         plt.xlabel(cfg.get("xlabel", "Longitude"))
@@ -279,20 +365,21 @@ class KrigingMapPlotter:
         title_prefix = cfg.get("title_prefix", "Kriging Interpolation")
         plt.title(f"{title_prefix} ({self.krig.variogram_model} model)")
         if cfg.get("legend", True):
-            plt.legend()
+            plt.legend(loc="upper right")
+
+        # Save/show
         save_plots = self.plot_cfg.cfg.get("save_plots", False)
         show_plots = self.plot_cfg.cfg.get("show_plots", True)
         plots_dir = self.plot_cfg.cfg.get("plots_directory", "./plots")
-
         if save_plots:
             os.makedirs(plots_dir, exist_ok=True)
             fname = f"kriging_interp_{self.krig.year:04d}-{self.krig.month:02d}-{self.krig.day:02d}.png"
             plt.savefig(os.path.join(plots_dir, fname), dpi=300, bbox_inches="tight")
-
         if show_plots:
             plt.show()
         else:
             plt.close()
+
 
     def plot_error_variance(self):
         if self.krig.kriging_variance is None:
@@ -304,6 +391,11 @@ class KrigingMapPlotter:
         land_mask = _get_land_mask(self.krig)
         if land_mask is not None and land_mask.shape == var.shape:
             var = np.ma.masked_where(~land_mask.astype(bool), var)
+
+        # CONUS mask
+        conus_mask = _get_conus_mask(self.krig)
+        if conus_mask is not None:
+            var = np.ma.masked_where(~conus_mask, var)
 
         plt.figure(figsize=self.config_error.get("figure_size", [8, 6]))
         plt.contourf(
