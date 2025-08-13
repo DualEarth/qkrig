@@ -1,10 +1,11 @@
 # ./configs/usgsgaugekrig.yaml
 
 data:
-  metadata_file: "/Users/jmframe/qkrig/data/usgs_site_info.csv"
-  data_dir: "/Users/jmframe/data/usgskrig"
+  metadata_file: "/home/exouser/qkrig/data/usgs_site_info.csv"
+  data_dir: "/home/exouser/data/usgskrig"
 #  site_list_file: "/Users/jmframe/qkrig/data/list_22_camels_basins_NoLeaf.txt"
-  site_list_file: "/Users/jmframe/qkrig/data/usgs_active_sites_Oct01_2024.txt"
+  site_list_file: "/home/exouser/qkrig/data/usgs_active_sites_Oct01_2024.txt"
+  data_cache_directory: "/media/volume/ml_ngen/usgskrig/usgs_retrieval_logs/"
 settings:
   date_format: "%Y %m %d"
   add_random_sites: 0
@@ -13,7 +14,7 @@ settings:
   retry_backoff_seconds: 0.75
   min_area_km2: 0
   bbox: [-125, 24, -66, 50]
-plot_config: "/Users/jmframe/qkrig/configs/plot_config.yaml"
+plot_config: "/home/exouser/qkrig/configs/plot_config.yaml"
 kriging:
   grid_size: 100
   variogram_model: "spherical"

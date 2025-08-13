@@ -1,5 +1,3 @@
-# usgs_loader.py
-
 from __future__ import annotations
 
 import os
@@ -18,25 +16,31 @@ import dataretrieval.nwis as nwis
 
 class USGSLoader(BaseLoader):
     """
-    Parallel USGS daily-discharge loader.
+    Parallel USGS daily-discharge loader with post-load bbox filtering.
 
     Reads site metadata from a CSV (same schema you used before), optionally filters
     by a provided site list, geographic bounding box, and minimum drainage area, and
     then fetches daily discharge for a target date in parallel via NWIS.
 
+    NEW: Even if cached/raw data contain sites outside the bbox, we drop them
+    before returning data for interpolation.
+
     Config keys used:
-    
+
     data:
       metadata_file: path to USGS site info CSV
       site_list_file: optional text file with one site id per line
+      data_cache_directory: output dir for KV/logs
     settings:
-      date_format: "%Y-%m-%d" (unused here but retained for parity)
-      add_random_sites: 0 (optional; appends a random sample from metadata)
-      concurrency: 16                 # number of threads
-      max_retries: 3                  # per-site retry attempts
-      retry_backoff_seconds: 0.75     # base backoff (with jitter)
-      min_area_km2: 0                 # filter small basins
+      date_format: "%Y-%m-%d"
+      add_random_sites: 0
+      concurrency: 16
+      max_retries: 3
+      retry_backoff_seconds: 0.75
+      min_area_km2: 0
       bbox: [-125, 24, -66, 50]       # [min_lon, min_lat, max_lon, max_lat]
+      # optional:
+      bbox_pad_deg: 0.0               # small padding (deg) applied at filtering time
     """
 
     def __init__(self, config_path: str):
@@ -55,13 +59,11 @@ class USGSLoader(BaseLoader):
         # Optional filters
         self.min_area_km2: float = float(scfg.get("min_area_km2", 0.0))
         self.bbox: Optional[List[float]] = scfg.get("bbox")  # [min_lon, min_lat, max_lon, max_lat]
+        self.bbox_pad_deg: float = float(scfg.get("bbox_pad_deg", 0.0))
 
-        # Logging directory (in main/current working directory)
-        self.logs_dir = os.path.join(os.getcwd(), "usgs_retrieval_logs")
+        # Logging directory
+        self.logs_dir = dcfg.get("data_cache_directory")
         os.makedirs(self.logs_dir, exist_ok=True)
-
-        # Gauge metadata loaded by BaseLoader->_load_gauge_metadata
-        # (set as self.gauge_metadata)
 
     # ---------------------------------------------------------------------
     # BaseLoader requirements
@@ -100,7 +102,7 @@ class USGSLoader(BaseLoader):
                     "drain_area_va": "area_km2",
                 }
             )[["gauge_id", "gauge_lat", "gauge_lon", "area_km2"]].dropna()
-            current = set(df["gauge_id"]) 
+            current = set(df["gauge_id"])
             candidates = all_sites[~all_sites["gauge_id"].isin(current)]
             sample_n = min(add_random, len(candidates))
             if sample_n > 0:
@@ -111,7 +113,7 @@ class USGSLoader(BaseLoader):
         if min_area > 0:
             df = df[df["area_km2"] >= min_area]
 
-        # Optional geographic bounding box filter
+        # Optional geographic bounding box filter (metadata-level)
         bbox = scfg.get("bbox")
         if bbox and len(bbox) == 4:
             min_lon, min_lat, max_lon, max_lat = map(float, bbox)
@@ -128,18 +130,13 @@ class USGSLoader(BaseLoader):
     # Helpers: file paths
     # ---------------------------------------------------------------------
     def _log_path_for_date(self, date_str: str) -> str:
-        # Human-readable log, e.g., usgs_retrieval_logs/2025-08-11.txt
         return os.path.join(self.logs_dir, f"{date_str}.txt")
 
     def _kv_path_for_date(self, date_str: str) -> str:
-        # Key-value cache, e.g., usgs_retrieval_logs/2025-08-11.kv.txt
         return os.path.join(self.logs_dir, f"{date_str}.kv.txt")
 
     # ---------------------------------------------------------------------
     # Helpers: KV cache (simple key=value lines)
-    #   OK line:   <site_id>=OK,<lon>,<lat>,<mm_day>
-    #   FAIL line: <site_id>=FAIL,<reason>
-    #   Lines starting with '#' are comments and ignored.
     # ---------------------------------------------------------------------
     def _save_kv_cache(
         self,
@@ -151,12 +148,9 @@ class USGSLoader(BaseLoader):
         lines = []
         lines.append(f"# KV cache for USGS retrieval on {date_str}")
         lines.append(f"# Generated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        # successes: (lon, lat, mm_day, site_id)
         for lon, lat, mm_day, sid in sorted(successes, key=lambda r: r[3]):
             lines.append(f"{sid}=OK,{lon:.8f},{lat:.8f},{mm_day:.8f}")
-        # failures: (site_id, reason)
         for sid, reason in sorted(failures, key=lambda r: r[0]):
-            # Ensure reason has no commas that would break simple parsing
             reason_clean = str(reason).replace(",", ";")
             lines.append(f"{sid}=FAIL,{reason_clean}")
         with open(path, "w", encoding="utf-8") as f:
@@ -195,7 +189,7 @@ class USGSLoader(BaseLoader):
         return successes, failures
 
     # ---------------------------------------------------------------------
-    # Helpers: human-readable logging (unchanged)
+    # Helpers: human-readable logging
     # ---------------------------------------------------------------------
     def _write_log(
         self,
@@ -204,11 +198,6 @@ class USGSLoader(BaseLoader):
         successes: List[Tuple[float, float, float, str]],
         failures: List[Tuple[str, str]],
     ) -> None:
-        """
-        Write a human-readable log file enumerating successes and failures.
-        failures: list of (site_id, reason)
-        successes: list of (lon, lat, mm_day, site_id)
-        """
         path = self._log_path_for_date(date_str)
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         total = len(attempted_sites)
@@ -238,9 +227,36 @@ class USGSLoader(BaseLoader):
         else:
             lines.append("(none)")
 
-        # Write file (overwrite for this date run)
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
+
+    # ---------------------------------------------------------------------
+    # NEW: post-load bbox filter
+    # ---------------------------------------------------------------------
+    def _filter_by_bbox(
+        self,
+        records: List[Tuple[float, float, float, str]]
+    ) -> List[Tuple[float, float, float, str]]:
+        """
+        Apply bbox (with optional padding) to (lon, lat, mm, site_id) records.
+        Does not modify cache files; only filters what we return.
+        """
+        if not records or not self.bbox or len(self.bbox) != 4:
+            return records
+
+        min_lon, min_lat, max_lon, max_lat = map(float, self.bbox)
+        pad = float(self.bbox_pad_deg)
+        min_lon -= pad; min_lat -= pad; max_lon += pad; max_lat += pad
+
+        filtered = [
+            (lon, lat, mm, sid)
+            for (lon, lat, mm, sid) in records
+            if (min_lon <= lon <= max_lon) and (min_lat <= lat <= max_lat)
+        ]
+        dropped = len(records) - len(filtered)
+        if dropped > 0:
+            print(f"[bbox] Dropped {dropped} record(s) outside {min_lon:.3f},{min_lat:.3f},{max_lon:.3f},{max_lat:.3f}")
+        return filtered
 
     # ---------------------------------------------------------------------
     # Public API
@@ -249,22 +265,28 @@ class USGSLoader(BaseLoader):
         """
         Fetch (lon, lat, streamflow_mm_day, gauge_id) for all gauges on a date in parallel.
         Returns a list of tuples, with negatives removed.
+
         Caching:
-          - If ./usgs_retrieval_logs/<YYYY-MM-DD>.kv.txt exists, load from it and skip NWIS calls.
-        Also writes a detailed retrieval log to ./usgs_retrieval_logs/<YYYY-MM-DD>.txt
-        and a KV cache to ./usgs_retrieval_logs/<YYYY-MM-DD>.kv.txt when retrieval is performed.
+          - If <logs_dir>/<YYYY-MM-DD>.kv.txt exists, load from it and skip NWIS calls.
+        Also writes a detailed retrieval log and KV cache when retrieval is performed.
+
+        NOTE: Always applies bbox filtering to the results before returning.
         """
         target = pd.Timestamp(year=year, month=month, day=day)
         date_str = target.strftime("%Y-%m-%d")
 
-        # If KV cache exists, load and return immediately
+        # If KV cache exists, load and return (after bbox filter)
         cached = self._load_kv_cache(date_str)
         if cached is not None:
             successes, failures = cached
             if successes:
+                successes = self._filter_by_bbox(successes)  # <- apply bbox here
+                if not successes:
+                    print(f"[cache+bbox] No data within bbox for {date_str}.")
+                    return []
                 arr = np.array(successes, dtype=[("lon", float), ("lat", float), ("streamflow", float), ("gauge_id", "U15")])
                 vals = arr["streamflow"]
-                print(f"[cache] Summary for {date_str}")
+                print(f"[cache] Summary for {date_str} (after bbox filter)")
                 print(f"  - Observations: {len(vals)}")
                 print(f"  - Min: {np.min(vals):.2f}, Max: {np.max(vals):.2f}, Mean: {np.mean(vals):.2f}")
                 return arr.tolist()
@@ -274,7 +296,6 @@ class USGSLoader(BaseLoader):
 
         # Fast-exit if no metadata, but still emit a log and KV cache
         if self.gauge_metadata.empty:
-            # No gauges => write empty files for traceability
             self._write_log(date_str, attempted_sites=[], successes=[], failures=[])
             self._save_kv_cache(date_str, successes=[], failures=[])
             print(f"No gauges to query for {date_str}.")
@@ -332,18 +353,16 @@ class USGSLoader(BaseLoader):
                     area_m2 = area_km2 * 1e6
                     mm_day = (cfs * 0.0283168 * 86400.0 / area_m2) * 1000.0
 
-                    # filter large negatives here; return None to drop
+                    # filter large magnitudes
                     if mm_day < -69 or mm_day > 69:
                         return (None, "Large_magnitude_flow", site_id)
 
                     return ((lon, lat, mm_day, site_id), "ok", site_id)
 
-                except Exception as e:
+                except Exception:
                     attempt += 1
                     if attempt > self.max_retries:
-                        # Avoid dumping huge traces to the log; keep reason compact
                         return (None, "exception_after_retries", site_id)
-                    # backoff with jitter
                     sleep_s = self.retry_backoff * (1 + random.random()) * attempt
                     time.sleep(sleep_s)
 
@@ -357,25 +376,29 @@ class USGSLoader(BaseLoader):
                 else:
                     failures.append((sid, status))
 
-        # Write retrieval log (success + failure, including all attempted)
+        # Write retrieval log and KV cache (unfiltered)
         self._write_log(
             date_str=date_str,
             attempted_sites=sites,
             successes=results,
             failures=failures,
         )
-
-        # Write KV cache for future fast reads
         self._save_kv_cache(date_str, successes=results, failures=failures)
 
         if not results:
             print(f"No data for {date_str}.")
             return []
 
-        # Summary & negative screening already handled; convert to structured array then list
+        # Apply bbox **now** (does not modify the cache)
+        results = self._filter_by_bbox(results)
+        if not results:
+            print(f"[bbox] No data within bbox for {date_str}.")
+            return []
+
+        # Summary & convert to structured array
         arr = np.array(results, dtype=[("lon", float), ("lat", float), ("streamflow", float), ("gauge_id", "U15")])
         vals = arr["streamflow"]
-        print(f"Summary for {date_str}")
+        print(f"Summary for {date_str} (after bbox filter)")
         print(f"  - Observations: {len(vals)}")
         print(f"  - Min: {np.min(vals):.2f}, Max: {np.max(vals):.2f}, Mean: {np.mean(vals):.2f}")
 

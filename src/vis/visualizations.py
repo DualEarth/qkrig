@@ -15,6 +15,9 @@ class PlotConfig:
 
     def _load_yaml_or_default(self, path):
         default = {
+            "save_plots": False,
+            "show_plots": True,
+            "plots_directory": "./plots",
             "variogram": {
                 "figure_size": [8, 5],
                 "color": "blue",
@@ -29,6 +32,8 @@ class PlotConfig:
                 "cmap": "coolwarm",
                 "levels": 15,
                 "colorbar_label": "Interpolated Streamflow (mm/day)",
+                "max_value": None,
+                "min_value": None,
                 "scatter": {
                     "cmap": "coolwarm",
                     "s": 8,
@@ -200,7 +205,19 @@ class VariogramPlotter:
         plt.title(f"{title_prefix} - {date_str}")
         if self.config.get("legend", True):
             plt.legend()
-        plt.show()
+        save_plots = self.plot_cfg.cfg.get("save_plots", False)
+        show_plots = self.plot_cfg.cfg.get("show_plots", True)
+        plots_dir = self.plot_cfg.cfg.get("plots_directory", "./plots")
+
+        if save_plots:
+            os.makedirs(plots_dir, exist_ok=True)
+            fname = f"variogram_{self.krig.year:04d}-{self.krig.month:02d}-{self.krig.day:02d}.png"
+            plt.savefig(os.path.join(plots_dir, fname), dpi=300, bbox_inches="tight")
+
+        if show_plots:
+            plt.show()
+        else:
+            plt.close()
 
 
 class KrigingMapPlotter:
@@ -214,35 +231,68 @@ class KrigingMapPlotter:
         if self.krig.z_interp is None:
             raise RuntimeError("compute_kriging() must be run before plotting interpolation.")
 
-        z = np.clip(self.krig.z_interp, np.min(self.krig.values), np.max(self.krig.values))
+        # Determine vmin/vmax from config (support both max_value/min_value and vmax/vmin)
+        data_min = float(np.min(self.krig.values))
+        data_max = float(np.max(self.krig.values))
+
+        cfg = self.config_interp
+        vmin = cfg.get("min_value", cfg.get("vmin", None))
+        vmax = cfg.get("max_value", cfg.get("vmax", None))
+
+        # If unset, fall back to observed range
+        vmin = data_min if vmin is None else float(vmin)
+        vmax = data_max if vmax is None else float(vmax)
+
+        # Safety: ensure vmin <= vmax
+        if vmin > vmax:
+            vmin, vmax = vmax, vmin
+
+        # Clip interpolated surface to [vmin, vmax]
+        z = np.clip(self.krig.z_interp, vmin, vmax)
+
+        # Apply land mask (True==land)
         mask = _get_land_mask(self.krig)
         if mask is not None:
             z = np.ma.masked_where(~mask, z)
 
-        plt.figure(figsize=self.config_interp.get("figure_size", [8, 6]))
-        plt.contourf(
+        plt.figure(figsize=cfg.get("figure_size", [8, 6]))
+        cs = plt.contourf(
             self.krig.grid_lon, self.krig.grid_lat, z,
-            levels=self.config_interp.get("levels", 15),
-            cmap=self.config_interp.get("cmap", "coolwarm"),
+            levels=cfg.get("levels", 15),
+            cmap=cfg.get("cmap", "coolwarm"),
+            vmin=vmin, vmax=vmax,   # <- enforce color scale
         )
-        plt.colorbar(label=self.config_interp.get("colorbar_label", "Interpolated Streamflow (mm/day)"))
+        plt.colorbar(cs, label=cfg.get("colorbar_label", "Interpolated Streamflow (mm/day)"))
 
-        scatter_cfg = self.config_interp.get("scatter", {})
+        scatter_cfg = cfg.get("scatter", {})
         plt.scatter(
             self.krig.lons, self.krig.lats, c=self.krig.values,
             s=scatter_cfg.get("s", 8),
             cmap=scatter_cfg.get("cmap", "coolwarm"),
             edgecolors=scatter_cfg.get("edgecolors", "none"),
             label=scatter_cfg.get("label", "Observed Data"),
+            vmin=vmin, vmax=vmax,   # <- match the scale
         )
 
-        plt.xlabel(self.config_interp.get("xlabel", "Longitude"))
-        plt.ylabel(self.config_interp.get("ylabel", "Latitude"))
-        title_prefix = self.config_interp.get("title_prefix", "Kriging Interpolation")
+        plt.xlabel(cfg.get("xlabel", "Longitude"))
+        plt.ylabel(cfg.get("ylabel", "Latitude"))
+        title_prefix = cfg.get("title_prefix", "Kriging Interpolation")
         plt.title(f"{title_prefix} ({self.krig.variogram_model} model)")
-        if self.config_interp.get("legend", True):
+        if cfg.get("legend", True):
             plt.legend()
-        plt.show()
+        save_plots = self.plot_cfg.cfg.get("save_plots", False)
+        show_plots = self.plot_cfg.cfg.get("show_plots", True)
+        plots_dir = self.plot_cfg.cfg.get("plots_directory", "./plots")
+
+        if save_plots:
+            os.makedirs(plots_dir, exist_ok=True)
+            fname = f"kriging_interp_{self.krig.year:04d}-{self.krig.month:02d}-{self.krig.day:02d}.png"
+            plt.savefig(os.path.join(plots_dir, fname), dpi=300, bbox_inches="tight")
+
+        if show_plots:
+            plt.show()
+        else:
+            plt.close()
 
     def plot_error_variance(self):
         if self.krig.kriging_variance is None:
@@ -265,4 +315,16 @@ class KrigingMapPlotter:
         plt.xlabel(self.config_error.get("xlabel", "Longitude"))
         plt.ylabel(self.config_error.get("ylabel", "Latitude"))
         plt.title(self.config_error.get("title", "Kriging Error Variance Map"))
-        plt.show()
+        save_plots = self.plot_cfg.cfg.get("save_plots", False)
+        show_plots = self.plot_cfg.cfg.get("show_plots", True)
+        plots_dir = self.plot_cfg.cfg.get("plots_directory", "./plots")
+
+        if save_plots:
+            os.makedirs(plots_dir, exist_ok=True)
+            fname = f"kriging_error_{self.krig.year:04d}-{self.krig.month:02d}-{self.krig.day:02d}.png"
+            plt.savefig(os.path.join(plots_dir, fname), dpi=300, bbox_inches="tight")
+
+        if show_plots:
+            plt.show()
+        else:
+            plt.close()
