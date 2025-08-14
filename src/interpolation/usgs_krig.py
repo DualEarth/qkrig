@@ -26,3 +26,6 @@ class USGSKrig(BaseKrig):
 
     def map_krig_error_variance(self):
         self.krig_map_plotter.plot_error_variance()
+
+    def plot_interpolation_with_variogram(self, *args, **kwargs):
+        return self.krig_map_plotter.plot_interpolation_with_variogram(*args, **kwargs)

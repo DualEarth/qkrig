@@ -227,3 +227,6 @@ class BaseKrig:
 
     def map_krig_error_variance(self):
         raise NotImplementedError("Use visualization module to plot error variance.")
+    
+    def plot_interpolation_with_variogram():
+        raise NotImplementedError("Use visualization module to plot combo.")

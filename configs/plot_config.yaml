@@ -1,7 +1,9 @@
-save_plots: true
-show_plots: false
+save_plots: false
+show_plots: true
 plots_directory: "/media/volume/ml_ngen/usgskrig/plots"
-
+combo:
+  figure_size: [9, 8]
+  heights: [3, 1]
 variogram:
   figure_size: [8, 5]
   color: "blue"
@@ -13,7 +15,7 @@ variogram:
   font_size: 12
   legend: true
   max_value: 2000
-  min_value: 0
+  min_value: 1
   ylog: true 
 
 kriging_interpolation:

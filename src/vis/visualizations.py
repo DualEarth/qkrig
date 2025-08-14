@@ -9,6 +9,7 @@ from shapely.ops import unary_union
 from shapely.geometry import box
 from shapely import vectorized
 from matplotlib.colors import LogNorm, PowerNorm, BoundaryNorm
+from matplotlib import gridspec
 
 class PlotConfig:
     def __init__(self, path=None):
@@ -196,8 +197,7 @@ class VariogramPlotter:
         self.plot_cfg = PlotConfig(getattr(self.krig, "plot_config_path", None))
         self.config = self.plot_cfg["variogram"]
 
-    def plot(self):
-
+    def plot(self, ax=None):
         if not self.krig.semivariogram_ready():
             raise RuntimeError(
                 "Semivariogram not computed. Call `krig.compute_semivariogram(...)` before plotting."
@@ -205,45 +205,54 @@ class VariogramPlotter:
 
         bin_centers, semi_variance = self.krig._semivar_cache
 
-        plt.figure(figsize=self.config.get("figure_size", [8, 5]))
-        plt.scatter(
+        created_fig = False
+        if ax is None:
+            fig = plt.figure(figsize=self.config.get("figure_size", [8, 5]))
+            ax = fig.add_subplot(111)
+            created_fig = True
+        else:
+            fig = ax.figure
+
+        ax.scatter(
             bin_centers, semi_variance,
             c=self.config.get("color", "blue"),
             label=self.config.get("label", "Empirical Variogram"),
         )
-        plt.xlabel(self.config.get("xlabel", "Distance (km)"))
-        plt.ylabel(self.config.get("ylabel", "Semi-variance"))
+        ax.set_xlabel(self.config.get("xlabel", "Distance (km)"))
+        ax.set_ylabel(self.config.get("ylabel", "Semi-variance"))
+
+        # Title with date
         title_prefix = self.config.get("title_prefix", "Empirical Variogram")
-        date_str = f"{self.krig.year}-{self.krig.month:02d}-{self.krig.day:02d}"
-        plt.title(f"{title_prefix} - {date_str}")
+        date_str = f"{self.krig.year:04d}-{self.krig.month:02d}-{self.krig.day:02d}"
+#        ax.set_title(f"{title_prefix} — {date_str}")
 
+        # Axis limits / scale
+        ymin_cfg = self.config.get("min_value", 1)
         ymax_cfg = self.config.get("max_value", None)
-
         if self.config.get("ylog", False):
-            # Avoid non-positive values on log scale
-            current_ymin, current_ymax = plt.ylim()
-            eps = 1e-12
-            # If min <= 0, bump slightly positive
-            if current_ymin <= 0:
-                current_ymin = eps
-            plt.ylim(bottom=current_ymin, top=ymax_cfg)
-            plt.yscale("log")
+            ax.set_ylim(bottom=ymin_cfg, top=ymax_cfg)
+            ax.set_yscale("log")
+        else:
+            if ymin_cfg is not None or ymax_cfg is not None:
+                ax.set_ylim(bottom=ymin_cfg, top=ymax_cfg)
 
         if self.config.get("legend", True):
-            plt.legend(loc="lower left")
-        save_plots = self.plot_cfg.cfg.get("save_plots", False)
-        show_plots = self.plot_cfg.cfg.get("show_plots", True)
-        plots_dir = self.plot_cfg.cfg.get("plots_directory", "./plots")
+            ax.legend(loc="lower left")
 
-        if save_plots:
-            os.makedirs(plots_dir, exist_ok=True)
-            fname = f"variogram_{self.krig.year:04d}-{self.krig.month:02d}-{self.krig.day:02d}.png"
-            plt.savefig(os.path.join(plots_dir, fname), dpi=300, bbox_inches="tight")
+        # Only save/show if we created the figure here
+        if created_fig:
+            save_plots = self.plot_cfg.cfg.get("save_plots", False)
+            show_plots = self.plot_cfg.cfg.get("show_plots", True)
+            plots_dir = self.plot_cfg.cfg.get("plots_directory", "./plots")
+            if save_plots:
+                os.makedirs(plots_dir, exist_ok=True)
+                fname = f"variogram_{self.krig.year:04d}-{self.krig.month:02d}-{self.krig.day:02d}.png"
+                fig.savefig(os.path.join(plots_dir, fname), dpi=300, bbox_inches="tight")
+            if show_plots:
+                plt.show()
+            else:
+                plt.close(fig)
 
-        if show_plots:
-            plt.show()
-        else:
-            plt.close()
 
 
 class KrigingMapPlotter:
@@ -253,65 +262,78 @@ class KrigingMapPlotter:
         self.config_interp = self.plot_cfg["kriging_interpolation"]
         self.config_error = self.plot_cfg["kriging_error"]
 
-    def plot_interpolation(self):
+    def plot_interpolation(self, ax=None):
         if self.krig.z_interp is None:
             raise RuntimeError("compute_kriging() must be run before plotting interpolation.")
 
         cfg = self.config_interp
 
-        # Observed bounds
-        data_min = float(np.nanmin(self.krig.values))
-        data_max = float(np.nanmax(self.krig.values))
+        # --- Determine bounds safely ---
+        z_raw = np.asarray(self.krig.z_interp)
+        has_obs = hasattr(self.krig, "values") and isinstance(self.krig.values, np.ndarray) and self.krig.values.size > 0
 
-        # Config bounds
-        vmin = cfg.get("min_value", cfg.get("vmin", None))
-        vmax = cfg.get("max_value", cfg.get("vmax", None))
-        vmin = data_min if vmin is None else float(vmin)
-        vmax = data_max if vmax is None else float(vmax)
+        vmin_cfg = cfg.get("min_value", cfg.get("vmin", None))
+        vmax_cfg = cfg.get("max_value", cfg.get("vmax", None))
+
+        if vmin_cfg is None or vmax_cfg is None:
+            if has_obs:
+                data_min = float(np.nanmin(self.krig.values))
+                data_max = float(np.nanmax(self.krig.values))
+            else:
+                data_min = float(np.nanmin(z_raw))
+                data_max = float(np.nanmax(z_raw))
+        else:
+            data_min = data_max = None
+
+        vmin = float(vmin_cfg) if vmin_cfg is not None else data_min
+        vmax = float(vmax_cfg) if vmax_cfg is not None else data_max
         if vmin > vmax:
             vmin, vmax = vmax, vmin
 
-        # Clip surface
-        z = np.clip(self.krig.z_interp, vmin, vmax)
+        z = np.clip(z_raw, vmin, vmax)
 
-        # Land mask (True==land)
-        mask = _get_land_mask(self.krig)
-        if mask is not None:
-            z = np.ma.masked_where(~mask, z)
+        # Masks
+        land_mask = _get_land_mask(self.krig)
+        if land_mask is not None:
+            z = np.ma.masked_where(~land_mask, z)
 
-        # CONUS mask
-        conus_mask = _get_conus_mask(self.krig)
-        if conus_mask is not None:
-            z = np.ma.masked_where(~conus_mask, z)
+        try:
+            conus_mask = _get_conus_mask(self.krig)
+            if conus_mask is not None:
+                z = np.ma.masked_where(~conus_mask, z)
+        except NameError:
+            pass
 
-        # Pick normalization
-        # Back-compat: if log_scale is set, default to "log" unless user overrides "norm"
+        # Norm
+        from matplotlib.colors import LogNorm, PowerNorm, BoundaryNorm
         norm_name = cfg.get("norm", "log" if cfg.get("log_scale", False) else "linear").lower()
         cmap = cfg.get("cmap", "viridis")
-
         norm = None
         eps = 1e-12
-
         if norm_name == "log":
             vmin_eff = max(vmin, eps)
             z = np.ma.masked_where(z <= 0, z)
             norm = LogNorm(vmin=vmin_eff, vmax=vmax)
         elif norm_name == "power":
-            gamma = float(cfg.get("power_gamma", 0.5))  # <1 stretches low end
-            # PowerNorm works with non-negative values, allow zeros
+            gamma = float(cfg.get("power_gamma", 0.5))
             vmin_eff = max(vmin, 0.0)
             norm = PowerNorm(gamma=gamma, vmin=vmin_eff, vmax=vmax)
         else:
-            norm = None  # linear; vmin/vmax passed to plotting call
+            norm = None
 
-        # --- Render mode ---
+        # Figure/axes
+        created_fig = False
+        if ax is None:
+            fig = plt.figure(figsize=cfg.get("figure_size", [8, 6]))
+            ax = fig.add_subplot(111)
+            created_fig = True
+        else:
+            fig = ax.figure
+
+        # Render
         render_mode = cfg.get("render_mode", "pcolormesh").lower()
-
-        plt.figure(figsize=cfg.get("figure_size", [8, 6]))
-
         if render_mode == "pcolormesh":
-            # Continuous shading -> no “few colors” problem
-            pc = plt.pcolormesh(
+            mappable = ax.pcolormesh(
                 self.krig.grid_lon, self.krig.grid_lat, z,
                 shading="auto",
                 cmap=cmap,
@@ -319,13 +341,9 @@ class KrigingMapPlotter:
                 vmin=None if norm is not None else vmin,
                 vmax=None if norm is not None else vmax,
             )
-            cbar = plt.colorbar(pc, label=cfg.get("colorbar_label", "Interpolated Streamflow (mm/day)"))
-
-        else:  # "contourf"
+        else:
             levels_cfg = cfg.get("levels", 15)
             levels = levels_cfg
-
-            # If log norm + int levels -> build log-spaced boundaries
             if isinstance(levels_cfg, int) and norm_name == "log":
                 base = float(cfg.get("log_scale_base", 10.0))
                 start = np.log(max(vmin, eps)) / np.log(base)
@@ -333,10 +351,9 @@ class KrigingMapPlotter:
                 if stop <= start:
                     stop = start + 1.0
                 levels = np.logspace(start, stop, int(levels_cfg), base=base)
-                # Boundary norm to map bins to full colormap
                 norm = BoundaryNorm(levels, ncolors=plt.get_cmap(cmap).N, clip=True)
 
-            cs = plt.contourf(
+            mappable = ax.contourf(
                 self.krig.grid_lon, self.krig.grid_lat, z,
                 levels=levels,
                 cmap=cmap,
@@ -345,41 +362,81 @@ class KrigingMapPlotter:
                 vmax=None if norm is not None else vmax,
                 extend="both",
             )
-            cbar = plt.colorbar(cs, label=cfg.get("colorbar_label", "Interpolated Streamflow (mm/day)"))
 
-        # Observations (use same norm)
-        scatter_cfg = cfg.get("scatter", {})
-        plt.scatter(
-            self.krig.lons, self.krig.lats, c=self.krig.values,
-            s=scatter_cfg.get("s", 8),
-            cmap=scatter_cfg.get("cmap", cmap),
-            edgecolors=scatter_cfg.get("edgecolors", "none"),
-            label=scatter_cfg.get("label", "Observed Data"),
-            norm=norm,
-            vmin=None if norm is not None else vmin,
-            vmax=None if norm is not None else vmax,
-        )
+        # Colorbar
+        cbar = fig.colorbar(mappable, ax=ax, label=cfg.get("colorbar_label", "Interpolated Streamflow (mm/day)"))
 
-        plt.xlabel(cfg.get("xlabel", "Longitude"))
-        plt.ylabel(cfg.get("ylabel", "Latitude"))
-        title_prefix = cfg.get("title_prefix", "Kriging Interpolation")
-        plt.title(f"{title_prefix} ({self.krig.variogram_model} model)")
-        if cfg.get("legend", True):
-            plt.legend(loc="upper right")
+        # Observations (only if present)
+        if has_obs:
+            sc = ax.scatter(
+                self.krig.lons, self.krig.lats, c=self.krig.values,
+                s=cfg.get("scatter", {}).get("s", 8),
+                cmap=cfg.get("scatter", {}).get("cmap", cmap),
+                edgecolors=cfg.get("scatter", {}).get("edgecolors", "none"),
+                label=cfg.get("scatter", {}).get("label", "Observed Data"),
+                norm=norm,
+                vmin=None if norm is not None else vmin,
+                vmax=None if norm is not None else vmax,
+            )
 
-        # Save/show
+        # Labels & title
+        ax.set_xlabel(cfg.get("xlabel", "Longitude"))
+        ax.set_ylabel(cfg.get("ylabel", "Latitude"))
+        date_str = f"{self.krig.year:04d}-{self.krig.month:02d}-{self.krig.day:02d}"
+        ax.set_title(f"{cfg.get('title_prefix', 'Kriging Interpolation')} "
+                     f"({getattr(self.krig, 'variogram_model', 'restored')} model) — {date_str}")
+        if cfg.get("legend", True) and has_obs:
+            ax.legend(loc="upper right")
+
+        # Only save/show if we created the figure here
+        if created_fig:
+            save_plots = self.plot_cfg.cfg.get("save_plots", False)
+            show_plots = self.plot_cfg.cfg.get("show_plots", True)
+            plots_dir = self.plot_cfg.cfg.get("plots_directory", "./plots")
+            if save_plots:
+                os.makedirs(plots_dir, exist_ok=True)
+                fname = f"kriging_interp_{self.krig.year:04d}-{self.krig.month:02d}-{self.krig.day:02d}.png"
+                fig.savefig(os.path.join(plots_dir, fname), dpi=300, bbox_inches="tight")
+            if show_plots:
+                plt.show()
+            else:
+                plt.close(fig)
+
+    def plot_interpolation_with_variogram(self, heights=(3, 1), figsize=(9, 8)):
+        """
+        Stacked figure: map on top, short variogram underneath.
+        """
+        combo_cfg = self.plot_cfg["combo"] if "combo" in self.plot_cfg.cfg else {}
+        heights = tuple(combo_cfg.get("heights", heights))
+        figsize = tuple(combo_cfg.get("figure_size", figsize))
+
+        if self.krig.z_interp is None:
+            raise RuntimeError("compute_kriging() must be run before plotting interpolation.")
+        if not self.krig.semivariogram_ready():
+            raise RuntimeError("Semivariogram not computed. Call `krig.compute_semivariogram(...)` first.")
+
+        fig = plt.figure(figsize=figsize)
+        gs = gridspec.GridSpec(nrows=2, ncols=1, height_ratios=heights, hspace=0.25)
+        ax_map = fig.add_subplot(gs[0, 0])
+        ax_var = fig.add_subplot(gs[1, 0])
+
+        # draw into provided axes
+        self.plot_interpolation(ax=ax_map)
+        self.krig.variogram_plotter.plot(ax=ax_var)
+
+        # Save/show using global flags
         save_plots = self.plot_cfg.cfg.get("save_plots", False)
         show_plots = self.plot_cfg.cfg.get("show_plots", True)
         plots_dir = self.plot_cfg.cfg.get("plots_directory", "./plots")
         if save_plots:
             os.makedirs(plots_dir, exist_ok=True)
-            fname = f"kriging_interp_{self.krig.year:04d}-{self.krig.month:02d}-{self.krig.day:02d}.png"
-            plt.savefig(os.path.join(plots_dir, fname), dpi=300, bbox_inches="tight")
+            fname = f"kriging_combo_{self.krig.year:04d}-{self.krig.month:02d}-{self.krig.day:02d}.png"
+            fig.savefig(os.path.join(plots_dir, fname), dpi=300, bbox_inches="tight")
+
         if show_plots:
             plt.show()
         else:
-            plt.close()
-
+            plt.close(fig)
 
     def plot_error_variance(self):
         if self.krig.kriging_variance is None:
