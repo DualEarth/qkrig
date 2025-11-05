@@ -17,3 +17,4 @@ echo "$DATES" | xargs -n 1 -P $JOBS -I{} python3 qkrig_ts_daily.py {} "$OUT_DIR"
 
 echo "✅ All water-year catchment CSVs updated in $OUT_DIR"
 
+
