@@ -6,6 +6,7 @@ import yaml
 from pyproj import Geod
 from pykrige.ok import OrdinaryKriging
 from typing import Optional, Tuple, Dict
+from scipy.optimize import curve_fit
 
 class BaseKrig:
     def __init__(self, data, config_path, year, month, day):
@@ -62,16 +63,77 @@ class BaseKrig:
     # ---------------------------------------------------------------------
     # Core computations
     # ---------------------------------------------------------------------
+    def _spherical_model(self, h, sill, rng, nugget):
+        """Spherical variogram model."""
+        h = np.asarray(h, dtype=float)
+        gamma = np.where(
+            h <= rng,
+            nugget + sill * (1.5 * (h / rng) - 0.5 * (h / rng) ** 3),
+            nugget + sill,
+        )
+        return gamma
+    
+    def fit_variogram_from_empirical(self, bins: Optional[int] = None):
+        """
+        Fit a spherical variogram model to the empirical semivariogram.
+        Returns sill, range_km, nugget.
+        """
+        if not self.semivariogram_ready(bins):
+            self.compute_semivariogram(bins=bins)
+
+        h_km, gamma = self._semivar_cache
+
+        mask = np.isfinite(gamma)
+        h_km = h_km[mask]
+        gamma = gamma[mask]
+
+        if len(h_km) < 3:
+            raise RuntimeError("Not enough variogram points to fit model.")
+
+        # --- Initial guesses (robust defaults)
+        nugget0 = self.config["kriging"].get("nugget", 0.0)
+        sill0 = np.nanmax(gamma)
+        range0 = self.config["kriging"].get("range", np.nanmax(h_km))
+
+        p0 = [sill0, range0, nugget0]
+
+        bounds = (
+            (0.0, 1e-6, 0.0),      # lower
+            (np.inf, np.inf, np.inf),  # upper
+        )
+
+        popt, _ = curve_fit(
+            self._spherical_model,
+            h_km,
+            gamma,
+            p0=p0,
+            bounds=bounds,
+            maxfev=10_000,
+        )
+
+        sill, range_km, nugget = popt
+        return float(sill), float(range_km), float(nugget)
+
+    
+
+
+
+    
+
+
+
     def compute_kriging(self):
         kcfg = self.config.get("kriging", {}) or {}
-        variogram_params = None
+        # --- Fit variogram from empirical data (PER TIMESTEP)
+        sill, range_km, nugget = self.fit_variogram_from_empirical(
+            bins=kcfg.get("variogram_bins")
+        )
 
-        if kcfg.get("range"):
-            variogram_params = {
-                "sill": kcfg.get("sill", None),
-                "range": float(kcfg["range"]) / 111.0,  # km -> degrees (approx)
-                "nugget": kcfg.get("nugget", 0.0),
-            }
+        variogram_params = {
+            "sill": sill,
+            "range": range_km / 111.0,  # km → degrees
+            "nugget": nugget,
+        }
 
         ok = OrdinaryKriging(
             self.lons, self.lats, self.values,
