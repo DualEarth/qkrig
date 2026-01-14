@@ -6,7 +6,6 @@ import yaml
 from pyproj import Geod
 from pykrige.ok import OrdinaryKriging
 from typing import Optional, Tuple, Dict
-from scipy.optimize import curve_fit
 
 class BaseKrig:
     def __init__(self, data, config_path, year, month, day):
@@ -59,84 +58,107 @@ class BaseKrig:
         # Semivariogram cache
         self._semivar_cache: Optional[Tuple[np.ndarray, np.ndarray]] = None  # (bin_centers_km, semi_variance)
         self._semivar_bins_used: Optional[int] = None
+    
+    def fit_daily_variogram(self):
+        """
+        Fit empirical variogram for this day.
+        Returns sill, nugget, range in DEGREES (PyKrige-ready).
+        """
+        num_points = len(self.lons)
+        if num_points < 5:
+            raise ValueError("Too few points for variogram fitting")
+
+        distances = []
+        semivariances = []
+
+        for i in range(num_points):
+            for j in range(i + 1, num_points):
+                _, _, d_m = self.geod.inv(
+                    self.lons[i], self.lats[i],
+                    self.lons[j], self.lats[j]
+                )
+                distances.append(d_m / 1000.0)  # km
+                semivariances.append(0.5 * (self.values[i] - self.values[j]) ** 2)
+
+        distances = np.asarray(distances)
+        semivariances = np.asarray(semivariances)
+
+        n_bins = self.variogram_bins
+        max_dist = np.percentile(distances, 90)
+        bins = np.linspace(0, max_dist, n_bins + 1)
+        bin_ids = np.digitize(distances, bins)
+
+        gamma = []
+        bin_centers = []
+
+        for k in range(1, len(bins)):
+            mask = bin_ids == k
+            if np.any(mask):
+                gamma.append(np.mean(semivariances[mask]))
+                bin_centers.append(0.5 * (bins[k] + bins[k - 1]))
+
+        gamma = np.asarray(gamma)
+        bin_centers = np.asarray(bin_centers)
+
+        nugget = float(np.min(gamma))
+        sill = float(np.percentile(gamma, 90))
+
+        # First distance where semivariance reaches sill
+        idx = np.argmax(gamma >= 0.95 * sill)
+        range_km = bin_centers[idx]
+        range_deg = range_km / 111.0
+
+        return {
+            "nugget": nugget,
+            "sill": sill,
+            "range": range_deg
+        }
+
 
     # ---------------------------------------------------------------------
     # Core computations
     # ---------------------------------------------------------------------
-    def _spherical_model(self, h, sill, rng, nugget):
-        """Spherical variogram model."""
-        h = np.asarray(h, dtype=float)
-        gamma = np.where(
-            h <= rng,
-            nugget + sill * (1.5 * (h / rng) - 0.5 * (h / rng) ** 3),
-            nugget + sill,
-        )
-        return gamma
-    
-    def fit_variogram_from_empirical(self, bins: Optional[int] = None):
-        """
-        Fit a spherical variogram model to the empirical semivariogram.
-        Returns sill, range_km, nugget.
-        """
-        if not self.semivariogram_ready(bins):
-            self.compute_semivariogram(bins=bins)
-
-        h_km, gamma = self._semivar_cache
-
-        mask = np.isfinite(gamma)
-        h_km = h_km[mask]
-        gamma = gamma[mask]
-
-        if len(h_km) < 3:
-            raise RuntimeError("Not enough variogram points to fit model.")
-
-        # --- Initial guesses (robust defaults)
-        nugget0 = self.config["kriging"].get("nugget", 0.0)
-        sill0 = np.nanmax(gamma)
-        range0 = self.config["kriging"].get("range", np.nanmax(h_km))
-
-        p0 = [sill0, range0, nugget0]
-
-        bounds = (
-            (0.0, 1e-6, 0.0),      # lower
-            (np.inf, np.inf, np.inf),  # upper
-        )
-
-        popt, _ = curve_fit(
-            self._spherical_model,
-            h_km,
-            gamma,
-            p0=p0,
-            bounds=bounds,
-            maxfev=10_000,
-        )
-
-        sill, range_km, nugget = popt
-        return float(sill), float(range_km), float(nugget)
-
-    
-
-
-
-    
-
-
-
     def compute_kriging(self):
         kcfg = self.config.get("kriging", {}) or {}
-        # --- Fit variogram from empirical data (PER TIMESTEP)
-        sill, range_km, nugget = self.fit_variogram_from_empirical(
-            bins=kcfg.get("variogram_bins")
-        )
+        use_daily = kcfg.get("fit_daily_variogram", False)
 
-        variogram_params = {
-            "sill": sill,
-            "range": range_km / 111.0,  # km → degrees
-            "nugget": nugget,
-        }
+        variogram_params = None
+
+        if use_daily:
+            try:
+                vg = self.fit_daily_variogram()
+
+                if vg["range"] <= 0 or not np.isfinite(vg["sill"]):
+                    raise ValueError("Invalid daily variogram")
+
+                variogram_params = {
+                    "sill": vg["sill"],
+                    "range": vg["range"],
+                    "nugget": vg["nugget"],
+                }
+
+                print(
+                    f"[{self.year}-{self.month:02d}-{self.day:02d}] "
+                    f"Daily variogram | "
+                    f"sill={vg['sill']:.3f}, "
+                    f"range={vg['range']*111:.1f} km, "
+                    f"nugget={vg['nugget']:.3f}"
+                )
+
+            except Exception as e:
+                print(f"⚠️ Daily variogram failed, using config values: {e}")
+
+        if variogram_params is None and kcfg.get("range"):
+            variogram_params = {
+                "sill": kcfg.get("sill", None),
+                "range": float(kcfg["range"]) / 111.0,
+                "nugget": kcfg.get("nugget", 0.0),
+            }
 
         ok = OrdinaryKriging(
-            self.lons, self.lats, self.values,
+            self.lons,
+            self.lats,
+            self.values,
             variogram_model=self.variogram_model,
             exact_values=kcfg.get("exact_values", True),
             nlags=kcfg.get("nlags", 12),
@@ -144,7 +166,11 @@ class BaseKrig:
             variogram_parameters=variogram_params,
         )
 
-        self.z_interp, self.kriging_variance = ok.execute("grid", self.grid_lon, self.grid_lat)
+        self.z_interp, self.kriging_variance = ok.execute(
+            "grid", self.grid_lon, self.grid_lat
+        )
+
+
 
     def compute_semivariogram(self, bins: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray]:
         """
