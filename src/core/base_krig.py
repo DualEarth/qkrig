@@ -16,6 +16,8 @@ class BaseKrig:
         self.lons = self.data[:, 0]
         self.lats = self.data[:, 1]
         self.values = self.data[:, 2]
+        self.eps = 1e-3
+        self.values_log = np.log(self.values + self.eps)
         self.year = year
         self.month = month
         self.day = day
@@ -61,16 +63,40 @@ class BaseKrig:
     
     def fit_daily_variogram(self):
         """
-        Fit empirical variogram for this day.
+        Fit empirical variogram for this day in LOG-SPACE.
+
+        FIXED:
+        - nugget = 1
+        - range = 100 km
+
+        ESTIMATED (daily):
+        - sill (robust log-space variance)
+
         Returns sill, nugget, range in DEGREES (PyKrige-ready).
         """
         num_points = len(self.lons)
         if num_points < 5:
             raise ValueError("Too few points for variogram fitting")
 
+        # ------------------------------
+        # --- safe log-transform with less aggressive floor ---
+        eps = 0.2  # small flows treated as 0.2, keeps sill reasonable
+        values_log = np.log(np.maximum(self.values, eps))
+
+
+        # Fallback if any NaNs remain
+        if np.any(np.isnan(values_log)) or len(values_log) < 2:
+            print("[Variogram] invalid values detected, using config defaults")
+            return {
+                "nugget": 1.0,
+                "sill": 1.0,
+                "range": 100.0 / 111.0
+            }
+
         distances = []
         semivariances = []
 
+        # --- Pairwise distances and semivariances ---
         for i in range(num_points):
             for j in range(i + 1, num_points):
                 _, _, d_m = self.geod.inv(
@@ -78,11 +104,14 @@ class BaseKrig:
                     self.lons[j], self.lats[j]
                 )
                 distances.append(d_m / 1000.0)  # km
-                semivariances.append(0.5 * (self.values[i] - self.values[j]) ** 2)
+                semivariances.append(
+                    0.5 * (values_log[i] - values_log[j]) ** 2
+                )
 
         distances = np.asarray(distances)
         semivariances = np.asarray(semivariances)
 
+        # --- Bin empirical variogram ---
         n_bins = self.variogram_bins
         max_dist = np.percentile(distances, 90)
         bins = np.linspace(0, max_dist, n_bins + 1)
@@ -100,13 +129,25 @@ class BaseKrig:
         gamma = np.asarray(gamma)
         bin_centers = np.asarray(bin_centers)
 
-        nugget = float(np.min(gamma))
-        sill = float(np.percentile(gamma, 90))
+        # ------------------------------------------------------------------
+        # FIXED PARAMETERS
+        # ------------------------------------------------------------------
+        nugget = 1.0                 # fixed nugget
+        range_km = 100.0             # fixed range (km)
+        range_deg = range_km / 111.0 # convert to degrees
 
-        # First distance where semivariance reaches sill
-        idx = np.argmax(gamma >= 0.95 * sill)
-        range_km = bin_centers[idx]
-        range_deg = range_km / 111.0
+        # --- sill from gamma ---
+        if len(gamma) > 0:
+            sill = float(np.nanmax(gamma))
+ 
+        else:
+            sill = nugget + 1e-6
+
+        # ensure sill >= nugget
+        sill = max(sill, nugget + 1e-6)
+
+
+        print(f"[Variogram] log-std={np.std(values_log):.3f}, sill={sill:.3f}")
 
         return {
             "nugget": nugget,

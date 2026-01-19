@@ -142,6 +142,8 @@ class USGSKrig:
         self.lons = self.data[:, 0]
         self.lats = self.data[:, 1]
         self.values = self.data[:, 2]
+        self.eps = 1e-3
+        self.values_log = np.log(self.values + self.eps)
         self.year = year
         self.month = month
         self.day = day
@@ -164,50 +166,168 @@ class USGSKrig:
         self.z_interp = None
         self.kriging_variance = None
 
-    def _load_config(self, config_path):
-        """Loads the configuration from the YAML file."""
-        with open(config_path, "r") as f:
-            return yaml.safe_load(f)
+    def fit_daily_variogram(self):
+        """
+        Fit empirical variogram for this day in LOG-SPACE.
 
+        FIXED:
+        - nugget = 1
+        - range = 100 km
+
+        ESTIMATED (daily):
+        - sill (robust log-space variance)
+
+        Returns sill, nugget, range in DEGREES (PyKrige-ready).
+        """
+        num_points = len(self.lons)
+        if num_points < 5:
+            raise ValueError("Too few points for variogram fitting")
+
+        # ------------------------------
+        # --- safe log-transform with less aggressive floor ---
+        eps = 0.2  # small flows treated as 0.2, keeps sill reasonable
+        values_log = np.log(np.maximum(self.values, eps))
+
+        # Fallback if any NaNs remain
+        if np.any(np.isnan(values_log)) or len(values_log) < 2:
+            print("[Variogram] invalid values detected, using config defaults")
+            return {
+                "nugget": 1.0,
+                "sill": 1.0,
+                "range": 100.0 / 111.0
+            }
+
+        distances = []
+        semivariances = []
+
+        # --- Pairwise distances and semivariances ---
+        for i in range(num_points):
+            for j in range(i + 1, num_points):
+                _, _, d_m = self.geod.inv(
+                    self.lons[i], self.lats[i],
+                    self.lons[j], self.lats[j]
+                )
+                distances.append(d_m / 1000.0)  # km
+                semivariances.append(
+                    0.5 * (values_log[i] - values_log[j]) ** 2
+                )
+
+        distances = np.asarray(distances)
+        semivariances = np.asarray(semivariances)
+
+        # --- Bin empirical variogram ---
+        n_bins = self.variogram_bins
+        max_dist = np.percentile(distances, 90)
+        bins = np.linspace(0, max_dist, n_bins + 1)
+        bin_ids = np.digitize(distances, bins)
+
+        gamma = []
+        bin_centers = []
+
+        for k in range(1, len(bins)):
+            mask = bin_ids == k
+            if np.any(mask):
+                gamma.append(np.mean(semivariances[mask]))
+                bin_centers.append(0.5 * (bins[k] + bins[k - 1]))
+
+        gamma = np.asarray(gamma)
+        bin_centers = np.asarray(bin_centers)
+
+        # ------------------------------------------------------------------
+        # FIXED PARAMETERS
+        # ------------------------------------------------------------------
+        nugget = 1.0                 # fixed nugget
+        range_km = 100.0             # fixed range (km)
+        range_deg = range_km / 111.0 # convert to degrees
+
+        # --- sill from gamma ---
+        if len(gamma) > 0:
+            sill = float(np.nanmax(gamma))
+        else:
+            sill = nugget + 1e-6
+
+        # ensure sill >= nugget
+        sill = max(sill, nugget + 1e-6)
+
+
+        print(f"[Variogram] log-std={np.std(values_log):.3f}, sill={sill:.3f}")
+
+        return {
+            "nugget": nugget,
+            "sill": sill,
+            "range": range_deg
+        }
+
+    
     def compute_kriging(self):
         """
-        Computes ordinary kriging interpolation and error variance.
-        Stores the results in self.z_interp and self.kriging_variance.
+        Computes ordinary kriging interpolation and error variance
+        using the SAME logic as BaseKrig.
         """
-        print(f"Computing Kriging using {self.variogram_model} variogram model...")
+        kcfg = self.config.get("kriging", {}) or {}
+        use_daily = kcfg.get("fit_daily_variogram", False)
 
-        # Read sensitivity parameters from config
-        sill = self.config["kriging"].get("sill", None)
-        nugget = self.config["kriging"].get("nugget", 0.0)
-        exact_values = self.config["kriging"].get("exact_values", True)
-        nlags = self.config["kriging"].get("nlags", 12)
-        weight = self.config["kriging"].get("weight", True)
-        variogram_range_km = self.config["kriging"].get("range", None)
+        variogram_params = None
 
-        # Convert range from km to degrees
-        if variogram_range_km:
-            variogram_range_deg = variogram_range_km / 111  # Approximate conversion (1° ≈ 111 km)
-        else:
-            variogram_range_deg = None  # Auto-fit if not provided
+        # -----------------------------------------
+        # Daily variogram (same as BaseKrig)
+        # -----------------------------------------
+        if use_daily:
+            try:
+                vg = self.fit_daily_variogram()
 
-        # Define variogram parameters
-        variogram_parameters = None
-        if variogram_range_deg:
-            variogram_parameters = {"sill": sill, "range": variogram_range_deg, "nugget": nugget}
+                if (
+                    not np.isfinite(vg["sill"]) or
+                    not np.isfinite(vg["range"]) or
+                    vg["range"] <= 0
+                ):
+                    raise ValueError("Invalid daily variogram")
 
-        min_val, max_val = np.min(self.values), np.max(self.values)
+                variogram_params = {
+                    "sill": vg["sill"],
+                    "range": vg["range"],     # already in degrees
+                    "nugget": vg["nugget"],
+                }
 
-        # Ordinary Kriging with adjusted range
+                print(
+                    f"[{self.year}-{self.month:02d}-{self.day:02d}] "
+                    f"Daily variogram | "
+                    f"sill={vg['sill']:.3f}, "
+                    f"range={vg['range']*111:.1f} km, "
+                    f"nugget={vg['nugget']:.3f}"
+                )
+
+            except Exception as e:
+                print(f"⚠️ Daily variogram failed, using config values: {e}")
+
+        # -----------------------------------------
+        # Fallback to config (fixed 100 km range)
+        # -----------------------------------------
+        if variogram_params is None and kcfg.get("range"):
+            variogram_params = {
+                "sill": kcfg.get("sill", None),
+                "range": float(kcfg["range"]) / 111.0,  # km → degrees
+                "nugget": kcfg.get("nugget", 0.0),
+            }
+
+        # -----------------------------------------
+        # Ordinary Kriging (identical)
+        # -----------------------------------------
         ok = OrdinaryKriging(
-            self.lons, self.lats, self.values,
+            self.lons,
+            self.lats,
+            self.values,
             variogram_model=self.variogram_model,
-            exact_values=exact_values,
-            nlags=nlags,
-            weight=weight,
-            variogram_parameters=variogram_parameters
+            exact_values=kcfg.get("exact_values", True),
+            nlags=kcfg.get("nlags", 12),
+            weight=kcfg.get("weight", True),
+            variogram_parameters=variogram_params,
         )
 
-        self.z_interp, self.kriging_variance = ok.execute("grid", self.grid_lon, self.grid_lat)
+        self.z_interp, self.kriging_variance = ok.execute(
+            "grid", self.grid_lon, self.grid_lat
+        )
+
 
     def plot_variogram(self):
         """
