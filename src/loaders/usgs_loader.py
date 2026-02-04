@@ -16,14 +16,17 @@ import dataretrieval.nwis as nwis
 
 class USGSLoader(BaseLoader):
     """
-    Parallel USGS daily-discharge loader with post-load bbox filtering.
+    Parallel USGS 15-minute instantaneous value (IV) loader with post-load bbox filtering.
 
-    Reads site metadata from a CSV (same schema you used before), optionally filters
-    by a provided site list, geographic bounding box, and minimum drainage area, and
-    then fetches daily discharge for a target date in parallel via NWIS.
+    Reads site metadata from a CSV, optionally filters by a provided site list,
+    geographic bounding box, and minimum drainage area, and then fetches 15-minute
+    instantaneous discharge for a target date/time in parallel via NWIS.
 
-    NEW: Even if cached/raw data contain sites outside the bbox, we drop them
-    before returning data for interpolation.
+    NEW: Fetches 15-minute IV data instead of daily values. Returns streamflow in mm/15min.
+    
+    Usage:
+      - get_streamflow(year, month, day) -> Returns dict with all 96 15-min timestamps
+      - get_streamflow(year, month, day, hour, minute) -> Returns list for that timestamp
 
     Config keys used:
 
@@ -39,9 +42,9 @@ class USGSLoader(BaseLoader):
       retry_backoff_seconds: 0.75
       min_area_km2: 0
       bbox: [-125, 24, -66, 50]       # [min_lon, min_lat, max_lon, max_lat]
-      # optional:
       bbox_pad_deg: 0.0               # small padding (deg) applied at filtering time
     """
+
 
     def __init__(self, config_path: str):
         super().__init__(config_path)
@@ -257,61 +260,98 @@ class USGSLoader(BaseLoader):
         if dropped > 0:
             print(f"[bbox] Dropped {dropped} record(s) outside {min_lon:.3f},{min_lat:.3f},{max_lon:.3f},{max_lat:.3f}")
         return filtered
-
     # ---------------------------------------------------------------------
     # Public API
     # ---------------------------------------------------------------------
-    def get_streamflow(self, year: int, month: int, day: int) -> List[Tuple[float, float, float, str]]:
+    def get_streamflow(
+        self, 
+        year: int, 
+        month: int, 
+        day: int,
+        hour: Optional[int] = None,
+        minute: Optional[int] = None
+    ):
         """
-        Fetch (lon, lat, streamflow_mm_day, gauge_id) for all gauges on a date in parallel.
-        Returns a list of tuples, with negatives removed.
-
+        Fetch 15-minute instantaneous streamflow data for all gauges on a date.
+        
+        Args:
+            year, month, day: Target date
+            hour, minute: Optional - if provided, returns data for that specific
+                         15-minute window only. If not provided, returns all
+                         96 timestamps for the day.
+        
+        Returns:
+            If hour/minute specified: List[Tuple[float, float, float, str]]
+                List of (lon, lat, streamflow_mm_15min, gauge_id) tuples
+            If hour/minute NOT specified: Dict[str, List[Tuple[float, float, float, str]]]
+                Dict keyed by timestamp string (YYYY-MM-DD_HH-MM) with lists of tuples
+        
         Caching:
-          - If <logs_dir>/<YYYY-MM-DD>.kv.txt exists, load from it and skip NWIS calls.
-        Also writes a detailed retrieval log and KV cache when retrieval is performed.
-
-        NOTE: Always applies bbox filtering to the results before returning.
+            Uses timestamped cache files (YYYY-MM-DD_HH-MM.kv.txt).
+            If fetching all timestamps, checks/creates cache for each.
+        
+        NOTE: Always applies bbox filtering to results before returning.
         """
-        target = pd.Timestamp(year=year, month=month, day=day)
-        date_str = target.strftime("%Y-%m-%d")
+        date_str = f"{year:04d}-{month:02d}-{day:02d}"
+        
+        # Determine if we're fetching specific time or all timestamps
+        fetch_single = hour is not None and minute is not None
+        
+        if fetch_single:
+            # Single timestamp mode - return list
+            return self._get_streamflow_single(year, month, day, hour, minute)
+        else:
+            # All timestamps mode - return dict with all 96 15-min intervals
+            return self._get_streamflow_all(year, month, day)
 
-        # If KV cache exists, load and return (after bbox filter)
-        cached = self._load_kv_cache(date_str)
+    def _get_streamflow_single(
+        self, 
+        year: int, 
+        month: int, 
+        day: int,
+        hour: int,
+        minute: int
+    ) -> List[Tuple[float, float, float, str]]:
+        """Fetch data for a single 15-minute timestamp."""
+        # NWIS IV data comes in UTC, so target must be tz-aware
+        target = pd.Timestamp(year=year, month=month, day=day, hour=hour, minute=minute, tz='UTC')
+        ts_str = target.strftime("%Y-%m-%d_%H-%M")
+        date_str = f"{year:04d}-{month:02d}-{day:02d}"
+
+        # Check cache
+        cached = self._load_kv_cache(ts_str)
         if cached is not None:
             successes, failures = cached
             if successes:
-                successes = self._filter_by_bbox(successes)  # <- apply bbox here
+                successes = self._filter_by_bbox(successes)
                 if not successes:
-                    print(f"[cache+bbox] No data within bbox for {date_str}.")
+                    print(f"[cache+bbox] No data within bbox for {ts_str}.")
                     return []
                 arr = np.array(successes, dtype=[("lon", float), ("lat", float), ("streamflow", float), ("gauge_id", "U15")])
                 vals = arr["streamflow"]
-                print(f"[cache] Summary for {date_str} (after bbox filter)")
+                print(f"[cache] Summary for {ts_str} (after bbox filter)")
                 print(f"  - Observations: {len(vals)}")
-                print(f"  - Min: {np.min(vals):.2f}, Max: {np.max(vals):.2f}, Mean: {np.mean(vals):.2f}")
+                print(f"  - Min: {np.min(vals):.4f}, Max: {np.max(vals):.4f}, Mean: {np.mean(vals):.4f}")
                 return arr.tolist()
             else:
-                print(f"[cache] No data for {date_str}.")
+                print(f"[cache] No data for {ts_str}.")
                 return []
 
-        # Fast-exit if no metadata, but still emit a log and KV cache
         if self.gauge_metadata.empty:
-            self._write_log(date_str, attempted_sites=[], successes=[], failures=[])
-            self._save_kv_cache(date_str, successes=[], failures=[])
-            print(f"No gauges to query for {date_str}.")
+            self._write_log(ts_str, attempted_sites=[], successes=[], failures=[])
+            self._save_kv_cache(ts_str, successes=[], failures=[])
+            print(f"No gauges to query for {ts_str}.")
             return []
 
-        # Build tasks
         sites = list(self.gauge_metadata.index.values)
-
         results: List[Tuple[float, float, float, str]] = []
-        failures: List[Tuple[str, str]] = []  # (site_id, reason)
+        failures: List[Tuple[str, str]] = []
 
-        def fetch_one(site_id: str) -> Tuple[Optional[Tuple[float, float, float, str]], str, str]:
-            """
-            Fetch one site's daily mean discharge and convert to mm/day, with retries.
-            Returns (record_or_None, status_reason, site_id).
-            """
+        print(f"[USGS IV] Fetching data for {ts_str}")
+        print(f"[USGS IV] Sites to query: {len(sites)}")
+
+        def fetch_one_iv(site_id: str) -> Tuple[Optional[Tuple[float, float, float, str]], str, str]:
+            """Fetch one site's IV discharge for the target timestamp."""
             try:
                 meta = self.gauge_metadata.loc[site_id]
             except KeyError:
@@ -322,84 +362,127 @@ class USGSLoader(BaseLoader):
                 return (None, "invalid_area", site_id)
 
             attempt = 0
+            sid = site_id.zfill(8)  # Always zero-pad to 8 digits for NWIS
             while True:
-                if attempt > 0:
-                    site_id = site_id.zfill(8)
                 try:
-                    df = nwis.get_record(
-                        sites=site_id,
-                        service="dv",
-                        start=date_str,
-                        end=date_str,
-                        parameterCd="00060",  # discharge
+                    # get_iv returns (DataFrame, metadata) tuple
+                    result = nwis.get_iv(
+                        sites=sid,
+                        startDT=date_str,
+                        endDT=date_str,
+                        parameterCd="00060",
                     )
+                    # Unpack tuple - first element is the DataFrame
+                    if isinstance(result, tuple):
+                        df = result[0]
+                    else:
+                        df = result
+                    
                     if df is None or df.empty:
                         return (None, "nwis_empty", site_id)
 
-                    # find column with 00060 and Mean (daily value)
-                    cols = [c for c in df.columns if ("00060" in c and "Mean" in c)]
+                    # Find 00060 column (IV data has no "Mean" suffix)
+                    cols = [c for c in df.columns if "00060" in c]
                     if not cols:
-                        return (None, "missing_mean_col", site_id)
+                        return (None, "missing_00060_col", site_id)
+
+                    # Find matching timestamp
+                    df.index = pd.to_datetime(df.index)
+                    if target in df.index:
+                        row = df.loc[target]
+                    else:
+                        # Find nearest within 7.5-minute window
+                        mask = abs(df.index - target) <= pd.Timedelta(minutes=7)
+                        if not mask.any():
+                            return (None, "no_matching_time", site_id)
+                        row = df[mask].iloc[0]
 
                     try:
-                        cfs = float(df.iloc[0][cols[0]])
+                        cfs = float(row[cols[0]])
                     except Exception:
                         return (None, "bad_value", site_id)
 
                     if not np.isfinite(cfs):
                         return (None, "nonfinite_cfs", site_id)
 
-                    # cfs -> mm/day
+                    # cfs -> mm/15min (900 seconds)
                     area_m2 = area_km2 * 1e6
-                    mm_day = (cfs * 0.0283168 * 86400.0 / area_m2) * 1000.0
+                    mm_15min = (cfs * 0.0283168 * 900.0 / area_m2) * 1000.0
 
-                    # filter large magnitudes
-                    if mm_day < -69 or mm_day > 69:
-                        return (None, "Large_magnitude_flow", site_id)
+                    # Filter large magnitudes (scaled for 15-min)
+                    if mm_15min < -1 or mm_15min > 5:
+                        return (None, "large_magnitude_flow", site_id)
 
-                    return ((lon, lat, mm_day, site_id), "ok", site_id)
+                    return ((lon, lat, mm_15min, site_id), "ok", site_id)
 
-                except Exception:
+                except Exception as e:
                     attempt += 1
                     if attempt > self.max_retries:
-                        return (None, "exception_after_retries", site_id)
+                        return (None, f"exception:{str(e)[:50]}", site_id)
                     sleep_s = self.retry_backoff * (1 + random.random()) * attempt
                     time.sleep(sleep_s)
 
-        # Parallel execution with bounded workers
+        # Parallel execution
+        completed = 0
+        total_sites = len(sites)
         with ThreadPoolExecutor(max_workers=self.concurrency) as ex:
-            futures = {ex.submit(fetch_one, sid): sid for sid in sites}
+            futures = {ex.submit(fetch_one_iv, sid): sid for sid in sites}
             for fut in as_completed(futures):
                 rec, status, sid = fut.result()
+                completed += 1
                 if rec is not None and status == "ok":
                     results.append(rec)
                 else:
                     failures.append((sid, status))
+                if completed % 100 == 0 or completed == total_sites:
+                    print(f"[USGS IV] Progress: {completed}/{total_sites}")
 
-        # Write retrieval log and KV cache (unfiltered)
-        self._write_log(
-            date_str=date_str,
-            attempted_sites=sites,
-            successes=results,
-            failures=failures,
-        )
-        self._save_kv_cache(date_str, successes=results, failures=failures)
+        self._write_log(ts_str, attempted_sites=sites, successes=results, failures=failures)
+        self._save_kv_cache(ts_str, successes=results, failures=failures)
 
         if not results:
-            print(f"No data for {date_str}.")
+            print(f"No data for {ts_str}.")
             return []
 
-        # Apply bbox **now** (does not modify the cache)
         results = self._filter_by_bbox(results)
         if not results:
-            print(f"[bbox] No data within bbox for {date_str}.")
+            print(f"[bbox] No data within bbox for {ts_str}.")
             return []
 
-        # Summary & convert to structured array
         arr = np.array(results, dtype=[("lon", float), ("lat", float), ("streamflow", float), ("gauge_id", "U15")])
         vals = arr["streamflow"]
-        print(f"Summary for {date_str} (after bbox filter)")
+        print(f"Summary for {ts_str} (after bbox filter)")
         print(f"  - Observations: {len(vals)}")
-        print(f"  - Min: {np.min(vals):.2f}, Max: {np.max(vals):.2f}, Mean: {np.mean(vals):.2f}")
+        print(f"  - Min: {np.min(vals):.4f}, Max: {np.max(vals):.4f}, Mean: {np.mean(vals):.4f}")
 
         return arr.tolist()
+
+    def _get_streamflow_all(
+        self, 
+        year: int, 
+        month: int, 
+        day: int
+    ) -> dict:
+        """
+        Fetch data for all 96 15-minute timestamps in a day.
+        Returns dict keyed by timestamp string.
+        """
+        results_dict = {}
+        
+        # Generate all 96 15-minute timestamps for the day
+        timestamps = []
+        for h in range(24):
+            for m in [0, 15, 30, 45]:
+                timestamps.append((h, m))
+        
+        print(f"[USGS IV] Fetching all 96 timestamps for {year:04d}-{month:02d}-{day:02d}")
+        
+        for h, m in timestamps:
+            ts_str = f"{year:04d}-{month:02d}-{day:02d}_{h:02d}-{m:02d}"
+            data = self._get_streamflow_single(year, month, day, h, m)
+            if data:
+                results_dict[ts_str] = data
+        
+        print(f"[USGS IV] Completed: {len(results_dict)}/96 timestamps have data")
+        return results_dict
+
