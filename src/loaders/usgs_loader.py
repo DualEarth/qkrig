@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import os
 import time
 import random
+import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Tuple, Optional, Dict
 from datetime import datetime
@@ -246,9 +248,12 @@ class USGSLoader(BaseLoader):
         Fetch discharge data for all gauges.
 
         Modes:
-          - Daily:     get_streamflow(year, month, day)      -> List
-          - Hourly IV: get_streamflow(year, month, day, H)   -> Dict of 4 Lists
-          - Single IV: get_streamflow(year, month, day, H, M) -> List
+          - Daily:     get_streamflow(year, month, day)      -> List of (lon, lat, mm_day, id)
+          - Hourly IV: get_streamflow(year, month, day, H)   -> List of (lon, lat, mm_hour, id)
+          - Single IV: get_streamflow(year, month, day, H, M) -> List of (lon, lat, mm_15min, id)
+
+        IV modes use the raw USGS REST API (same endpoint as fetch_usgs_iv_data)
+        to ensure consistent timestamps with the bulk pipeline.
 
         For bulk IV data, use the offline pipeline:
           usgs_raw_iv.py -> usgs_raw_to_iv_kv.py -> .kv.txt cache
@@ -328,11 +333,84 @@ class USGSLoader(BaseLoader):
 
         return self._finalize_results(date_str, sites, results, failures)
 
-    # --- IV mode: single timestamp ---
+    # --- IV helper: fetch full day via raw USGS REST API ---
+
+    def _fetch_day_iv(self, site_id: str, date_str: str) -> Optional[pd.DataFrame]:
+        """
+        Fetch all IV timestamps for one site and one day using the raw USGS
+        waterservices REST API (RDB format). Same endpoint as fetch_usgs_iv_data.
+
+        Returns DataFrame with columns ['datetime_utc', 'cfs'] or None on failure.
+        Timestamps are converted from local time (as returned by RDB) to UTC.
+        """
+        sid = site_id.zfill(8)
+        url = "https://waterservices.usgs.gov/nwis/iv/"
+        params = {
+            "format": "rdb",
+            "sites": sid,
+            "parameterCd": "00060",
+            "startDT": date_str,
+            "endDT": date_str,
+            "siteStatus": "all",
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+            resp.raise_for_status()
+        except Exception:
+            return None
+
+        # Parse RDB: skip comment lines (#) and the format row
+        lines = resp.text.splitlines()
+        header = None
+        data_lines = []
+        for line in lines:
+            if line.startswith("#"):
+                continue
+            if header is None:
+                header = line
+                continue
+            # Skip format row (e.g. "5s\t15s\t20d\t6s\t14n\t10s")
+            stripped = line.replace("\t", " ").strip()
+            if stripped and all(c.isdigit() or c in "sdn " for c in stripped):
+                continue
+            data_lines.append(line)
+
+        if not header or not data_lines:
+            return None
+
+        csv_text = header + "\n" + "\n".join(data_lines)
+        try:
+            df = pd.read_csv(io.StringIO(csv_text), sep="\t", dtype=str)
+        except Exception:
+            return None
+
+        # Find datetime and discharge columns
+        dt_col = next((c for c in df.columns if "datetime" in c.lower()), None)
+        flow_cols = [c for c in df.columns if "00060" in c and "_cd" not in c]
+        if not dt_col or not flow_cols:
+            return None
+
+        # Parse timestamps (RDB returns local time with UTC offset, e.g. "2024-09-27 00:00 EDT")
+        # pd.to_datetime handles the offset and converts to UTC
+        df["datetime_utc"] = pd.to_datetime(df[dt_col], utc=True, errors="coerce")
+        df["cfs"] = pd.to_numeric(df[flow_cols[0]], errors="coerce")
+        df = df.dropna(subset=["datetime_utc", "cfs"])
+
+        if df.empty:
+            return None
+
+        return df[["datetime_utc", "cfs"]].reset_index(drop=True)
+
+    # --- IV mode: single timestamp (nearest match) ---
 
     def _get_streamflow_iv(self, year, month, day, hour, minute):
-        """Fetch IV discharge (mm/15min) for a single timestamp via nwis.get_iv()."""
-        target = pd.Timestamp(year=year, month=month, day=day, hour=hour, minute=minute, tz='UTC')
+        """
+        Fetch IV discharge (mm/15min) for a single timestamp.
+        Uses raw USGS REST API, finds the nearest available timestamp
+        within a 7.5-minute window of the target.
+        """
+        target = pd.Timestamp(year=year, month=month, day=day,
+                              hour=hour, minute=minute, tz='UTC')
         ts_str = target.strftime("%Y-%m-%d_%H-%M")
         date_str = f"{year:04d}-{month:02d}-{day:02d}"
 
@@ -358,28 +436,24 @@ class USGSLoader(BaseLoader):
             lon, lat, area_km2 = float(meta["gauge_lon"]), float(meta["gauge_lat"]), float(meta["area_km2"])
             if not np.isfinite(area_km2) or area_km2 <= 0:
                 return (None, "invalid_area", site_id)
+
             attempt = 0
-            sid = site_id.zfill(8)
             while True:
                 try:
-                    result = nwis.get_iv(sites=sid, startDT=date_str, endDT=date_str, parameterCd="00060")
-                    df = result[0] if isinstance(result, tuple) else result
+                    df = self._fetch_day_iv(site_id, date_str)
                     if df is None or df.empty:
-                        return (None, "nwis_empty", site_id)
-                    cols = [c for c in df.columns if "00060" in c]
-                    if not cols:
-                        return (None, "missing_00060_col", site_id)
-                    df.index = pd.to_datetime(df.index)
-                    if target in df.index:
-                        row = df.loc[target]
-                    else:
-                        mask = abs(df.index - target) <= pd.Timedelta(minutes=7)
-                        if not mask.any():
-                            return (None, "no_matching_time", site_id)
-                        row = df[mask].iloc[0]
-                    cfs = float(row[cols[0]])
+                        return (None, "no_iv_data", site_id)
+
+                    # Find nearest timestamp within 7.5-minute window
+                    diffs = abs(df["datetime_utc"] - target)
+                    nearest_idx = diffs.idxmin()
+                    if diffs[nearest_idx] > pd.Timedelta(minutes=7, seconds=30):
+                        return (None, "no_matching_time", site_id)
+
+                    cfs = float(df.loc[nearest_idx, "cfs"])
                     if not np.isfinite(cfs):
                         return (None, "nonfinite_cfs", site_id)
+
                     area_m2 = area_km2 * 1e6
                     mm_15min = (cfs * 0.0283168 * 900.0 / area_m2) * 1000.0
                     if mm_15min < -10 or mm_15min > 100:
@@ -406,119 +480,83 @@ class USGSLoader(BaseLoader):
 
         return self._finalize_results(ts_str, sites, results, failures)
 
-    # --- IV mode: hourly (4 timestamps) ---
+    # --- IV mode: hourly mean ---
 
     def _get_streamflow_iv_hour(self, year, month, day, hour):
         """
-        Fetch IV discharge for all 4 timestamps in a given hour.
-        Returns dict keyed by 'YYYY-MM-DD_HH-MM'.
-        One API call per site covers all 4 timestamps.
+        Fetch IV discharge for all timestamps in a given hour, compute
+        the mean, and return a flat list of (lon, lat, mm_hour, gauge_id).
+
+        Uses raw USGS REST API. Averages all available timestamps in the
+        target hour (handles 5-min, 15-min, and offset timestamps).
         """
+        ts_str = f"{year:04d}-{month:02d}-{day:02d}_H{hour:02d}"
         date_str = f"{year:04d}-{month:02d}-{day:02d}"
-        targets = [
-            pd.Timestamp(year=year, month=month, day=day, hour=hour, minute=m, tz='UTC')
-            for m in (0, 15, 30, 45)
-        ]
-        ts_strs = [t.strftime("%Y-%m-%d_%H-%M") for t in targets]
 
-        results_dict: Dict[str, List] = {}
-        need_fetch = []
-        for i, ts_str in enumerate(ts_strs):
-            from_cache = self._return_cached(ts_str)
-            if from_cache is not None:
-                results_dict[ts_str] = from_cache
-            else:
-                need_fetch.append(i)
-
-        if not need_fetch:
-            return results_dict
-
-        fetch_targets = [targets[i] for i in need_fetch]
-        fetch_ts_strs = [ts_strs[i] for i in need_fetch]
+        from_cache = self._return_cached(ts_str)
+        if from_cache is not None:
+            return from_cache
 
         if self.gauge_metadata.empty:
-            for ts_str in fetch_ts_strs:
-                self._write_log(ts_str, [], [], [])
-                self._save_kv_cache(ts_str, [], [])
-                results_dict[ts_str] = []
-            print(f"No gauges to query for hour {hour:02d}.")
-            return results_dict
+            self._write_log(ts_str, [], [], [])
+            self._save_kv_cache(ts_str, [], [])
+            print(f"No gauges to query for {ts_str}.")
+            return []
 
         sites = list(self.gauge_metadata.index.values)
-        ts_results = {ts: [] for ts in fetch_ts_strs}
-        ts_failures = {ts: [] for ts in fetch_ts_strs}
-        print(f"[IV] Fetching hour {hour:02d} ({len(sites)} sites, {len(fetch_ts_strs)} timestamps)")
+        results, failures = [], []
+        print(f"[IV] Fetching hour {hour:02d} mean ({len(sites)} sites)")
 
         def fetch_one(site_id):
             try:
                 meta = self.gauge_metadata.loc[site_id]
             except KeyError:
-                return [(ts, None, "missing_metadata") for ts in fetch_ts_strs]
+                return (None, "missing_metadata", site_id)
             lon, lat, area_km2 = float(meta["gauge_lon"]), float(meta["gauge_lat"]), float(meta["area_km2"])
             if not np.isfinite(area_km2) or area_km2 <= 0:
-                return [(ts, None, "invalid_area") for ts in fetch_ts_strs]
+                return (None, "invalid_area", site_id)
+
             attempt = 0
-            sid = site_id.zfill(8)
             while True:
                 try:
-                    result = nwis.get_iv(sites=sid, startDT=date_str, endDT=date_str, parameterCd="00060")
-                    df = result[0] if isinstance(result, tuple) else result
+                    df = self._fetch_day_iv(site_id, date_str)
                     if df is None or df.empty:
-                        return [(ts, None, "nwis_empty") for ts in fetch_ts_strs]
-                    cols = [c for c in df.columns if "00060" in c]
-                    if not cols:
-                        return [(ts, None, "missing_00060_col") for ts in fetch_ts_strs]
-                    df.index = pd.to_datetime(df.index)
+                        return (None, "no_iv_data", site_id)
+
+                    # Filter to timestamps within the target hour
+                    hour_mask = df["datetime_utc"].dt.hour == hour
+                    hour_data = df[hour_mask]
+                    if hour_data.empty:
+                        return (None, "no_data_in_hour", site_id)
+
+                    # Mean CFS across all timestamps in the hour
+                    mean_cfs = hour_data["cfs"].mean()
+                    if not np.isfinite(mean_cfs):
+                        return (None, "nonfinite_cfs", site_id)
+
                     area_m2 = area_km2 * 1e6
-                    out = []
-                    for tgt, ts_str in zip(fetch_targets, fetch_ts_strs):
-                        if tgt in df.index:
-                            row = df.loc[tgt]
-                        else:
-                            mask = abs(df.index - tgt) <= pd.Timedelta(minutes=7)
-                            if not mask.any():
-                                out.append((ts_str, None, "no_matching_time"))
-                                continue
-                            row = df[mask].iloc[0]
-                        try:
-                            cfs = float(row[cols[0]])
-                        except Exception:
-                            out.append((ts_str, None, "bad_value"))
-                            continue
-                        if not np.isfinite(cfs):
-                            out.append((ts_str, None, "nonfinite_cfs"))
-                            continue
-                        mm_15min = (cfs * 0.0283168 * 900.0 / area_m2) * 1000.0
-                        if mm_15min < -10 or mm_15min > 100:
-                            out.append((ts_str, None, "large_magnitude_flow"))
-                            continue
-                        out.append((ts_str, (lon, lat, mm_15min, site_id), "ok"))
-                    return out
+                    mm_hour = (mean_cfs * 0.0283168 * 3600.0 / area_m2) * 1000.0
+                    if mm_hour < -40 or mm_hour > 400:
+                        return (None, "large_magnitude_flow", site_id)
+                    return ((lon, lat, mm_hour, site_id), "ok", site_id)
                 except Exception as e:
                     attempt += 1
                     if attempt > self.max_retries:
-                        return [(ts, None, f"exception:{str(e)[:50]}") for ts in fetch_ts_strs]
+                        return (None, f"exception:{str(e)[:50]}", site_id)
                     time.sleep(self.retry_backoff * (1 + random.random()) * attempt)
 
         completed, total = 0, len(sites)
         with ThreadPoolExecutor(max_workers=self.concurrency) as ex:
             futures = {ex.submit(fetch_one, sid): sid for sid in sites}
             for fut in as_completed(futures):
-                for ts_str, rec, status in fut.result():
-                    if rec is not None and status == "ok":
-                        ts_results[ts_str].append(rec)
-                    else:
-                        sid_from = rec[3] if rec else futures[fut]
-                        ts_failures[ts_str].append((str(sid_from), status))
+                rec, status, sid = fut.result()
                 completed += 1
+                if rec is not None and status == "ok":
+                    results.append(rec)
+                else:
+                    failures.append((sid, status))
                 if completed % 100 == 0 or completed == total:
                     print(f"[IV] {completed}/{total}")
 
-        for ts_str in fetch_ts_strs:
-            results_dict[ts_str] = self._finalize_results(
-                ts_str, sites, ts_results[ts_str], ts_failures[ts_str]
-            )
+        return self._finalize_results(ts_str, sites, results, failures)
 
-        ok_count = sum(1 for v in results_dict.values() if v)
-        print(f"[IV] Hour {hour:02d}: {ok_count}/{len(ts_strs)} timestamps have data")
-        return results_dict
