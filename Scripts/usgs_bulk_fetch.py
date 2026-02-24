@@ -161,16 +161,23 @@ def fetch_site_timeseries(
     attempt = 0
     while True:
         try:
-            df = nwis.get_record(
+            # df = nwis.get_record(
+            #     sites=site_id,
+            #     service="dv",
+            #     startDT=start_str,
+            #     endDT=end_str,
+            #     parameterCd="00060",
+            # )
+            df, _ = nwis.get_dv(
                 sites=site_id,
-                service="dv",
-                start=start_str,
-                end=end_str,
+                startDT=start_str,
+                endDT=end_str,
                 parameterCd="00060",
             )
             if df is None or df.empty:
                 return None
 
+            print(site_id, df.columns)
             cols = [c for c in df.columns if ("00060" in c and "Mean" in c)]
             if not cols:
                 return None
@@ -178,6 +185,9 @@ def fetch_site_timeseries(
             # Reduce to a single-series DF: daily mean discharge (cfs)
             ddf = df[[cols[0]]].copy()
             ddf = ddf.rename(columns={cols[0]: "cfs"})
+            ddf["cfs"] = pd.to_numeric(ddf["cfs"], errors="coerce")
+            ddf.index = pd.to_datetime(ddf.index).tz_localize(None)
+            ddf = ddf.sort_index()
             # Ensure datetime index
             if not isinstance(ddf.index, pd.DatetimeIndex):
                 ddf.index = pd.to_datetime(ddf.index)
@@ -222,6 +232,8 @@ def main():
         loader.retry_backoff = args.retry_backoff_seconds
 
     sites = list(loader.gauge_metadata.index.values)
+    print(sites)
+
     if not sites:
         print("No sites to fetch (after filtering). Exiting.")
         return
