@@ -134,14 +134,16 @@ def load_gauge_metadata(cfg: dict) -> pd.DataFrame:
     dcfg = cfg.get("data", {})
     scfg = cfg.get("settings", {})
 
-    df = pd.read_csv(dcfg["metadata_file"], comment="#", dtype={"site_no": str})
+    df = pd.read_csv(dcfg["metadata_file"], comment="#", dtype={"site_no": str, "0site_no": str})
     df = df.rename(columns={
         "site_no": "gauge_id",
+        "0site_no": "gauge_id",
         "dec_lat_va": "gauge_lat",
         "dec_long_va": "gauge_lon",
         "drain_area_va": "area_km2",
     })
-    df = df[["gauge_id", "gauge_lat", "gauge_lon", "area_km2"]].dropna()
+    df = df[["gauge_id", "gauge_lat", "gauge_lon", "area_km2"]]
+    df = df.dropna(subset=["gauge_lon", "gauge_lat"])
 
     # Filter by optional site list
     site_list_file = dcfg.get("site_list_file")
@@ -279,7 +281,7 @@ def fetch_and_cache_all_hours(
                 continue
 
             if not (np.isfinite(area_km2) and area_km2 > 0):
-                failures.append((sid, "invalid_area"))
+                failures.append((sid, "missing_drainage_area"))
                 continue
 
             df = per_site.get(sid)
@@ -300,12 +302,12 @@ def fetch_and_cache_all_hours(
                 failures.append((sid, "nonfinite_mean"))
                 continue
 
-            # CFS → mm/hr
-            area_m2 = area_km2 * 1e6
+            # CFS → mm/hr (drain_area_va is in sq miles, convert to m²)
+            area_m2 = area_km2 * 2.58999 * 1e6
             mm_hr = (mean_cfs * 0.0283168 * 3600.0 / area_m2) * 1000.0
 
-            if not np.isfinite(mm_hr) or mm_hr < -20 or mm_hr > 20:
-                failures.append((sid, f"large_magnitude_flow (mean_cfs={mean_cfs:.2f})"))
+            if not np.isfinite(mm_hr):
+                failures.append((sid, "nonfinite_value"))
                 continue
 
             successes.append((lon, lat, mm_hr, sid))
