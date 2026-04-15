@@ -38,6 +38,17 @@ from typing import Optional, Tuple, Dict, List, Iterable
 import numpy as np
 import pandas as pd
 
+# USGS timezone abbreviations → UTC offset (hours)
+TZ_MAP = {
+    "EST": -5, "EDT": -4,
+    "CST": -6, "CDT": -5,
+    "MST": -7, "MDT": -6,
+    "PST": -8, "PDT": -7,
+    "AKST": -9, "AKDT": -8,
+    "HST": -10, "HDT": -9,
+    "AST": -4, "ADT": -3,
+}
+
 
 # ======================================================================
 # CLI
@@ -376,10 +387,24 @@ def main() -> int:
 
         # Normalize
         df["site_id"] = df["site_no"].astype(str).str.strip()
-        df["dt"] = pd.to_datetime(df["datetime"], errors="coerce")
-        df = df.dropna(subset=["dt"])
+        df["dt_local"] = pd.to_datetime(df["datetime"], errors="coerce")
+        df = df.dropna(subset=["dt_local"])
 
-        # Date filter
+        # Convert local time to UTC using tz_cd column
+        if "tz_cd" in df.columns:
+            df["tz_cd"] = df["tz_cd"].astype(str).str.strip()
+            df["utc_offset_hrs"] = df["tz_cd"].map(TZ_MAP)
+            unmapped = df["utc_offset_hrs"].isna() & df["tz_cd"].notna()
+            if unmapped.any():
+                unknown = df.loc[unmapped, "tz_cd"].unique()
+                print(f"  WARNING: unknown timezone codes: {unknown}; treating as UTC")
+                df.loc[unmapped, "utc_offset_hrs"] = 0
+            df["dt"] = df["dt_local"] - pd.to_timedelta(df["utc_offset_hrs"], unit="h")
+        else:
+            print(f"  WARNING: no tz_cd column in {fname}; assuming UTC")
+            df["dt"] = df["dt_local"]
+
+        # Date filter (applied on UTC dates)
         if start or end:
             dates = df["dt"].dt.date
             mask = pd.Series(True, index=df.index)
@@ -394,7 +419,7 @@ def main() -> int:
         # Parse CFS values
         df["cfs"] = pd.to_numeric(df[flow_col], errors="coerce")
 
-        # Floor timestamps to the hour for grouping
+        # Floor UTC timestamps to the hour for grouping
         df["hour"] = df["dt"].dt.floor("h")
         df["hr_str"] = df["hour"].apply(datetime_to_hr_str)
 
