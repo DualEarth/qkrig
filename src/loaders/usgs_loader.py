@@ -64,7 +64,9 @@ class USGSLoader(BaseLoader):
             "dec_long_va": "gauge_lon",
             "drain_area_va": "area_km2",
         })
-
+        # PR#15 fix: drain_area_va is in sq miles, convert to sq km
+        df["area_km2"] = df["area_km2"] * 2.58999
+        
         required = ["gauge_id", "gauge_lat", "gauge_lon", "area_km2"]
         missing = [c for c in required if c not in df.columns]
         if missing:
@@ -92,6 +94,8 @@ class USGSLoader(BaseLoader):
                 "dec_long_va": "gauge_lon",
                 "drain_area_va": "area_km2",
             })[required].dropna()
+            # PR#15 fix: drain_area_va is in sq miles, convert to sq km
+            all_sites["area_km2"] = all_sites["area_km2"] * 2.58999
             current = set(df["gauge_id"])
             candidates = all_sites[~all_sites["gauge_id"].isin(current)]
             sample_n = min(add_random, len(candidates))
