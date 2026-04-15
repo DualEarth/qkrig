@@ -53,4 +53,4 @@ echo "$HOURS" | xargs -n 1 -P "$JOBS" -I{} \
     "$PYTHON_BIN" "$SCRIPT_DIR/qkrig_ts_hourly.py" {} "$OUT_DIR"
 
 echo ""
-echo "✅ All hourly catchment CSVs updated in $OUT_DIR"
+echo "All hourly catchment CSVs updated in $OUT_DIR"
