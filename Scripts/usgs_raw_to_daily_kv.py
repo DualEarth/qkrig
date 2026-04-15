@@ -41,6 +41,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end", default=None, help="Optional end date (YYYY-MM-DD) to restrict output.")
     p.add_argument("--overwrite", action="store_true",
                    help="If set, removes existing daily KV/log files within the selected date range before writing.")
+    p.add_argument("--site-list", default=None,
+                   help="Optional text file with one site ID per line. Only these sites will appear in output.")
+    p.add_argument("--bbox", nargs=4, type=float, metavar=("MIN_LON", "MIN_LAT", "MAX_LON", "MAX_LAT"),
+                   help="Bounding box filter: min_lon min_lat max_lon max_lat")
 
     # NEW: metadata parsing controls
     p.add_argument("--meta-sep", default=None,
@@ -147,6 +151,8 @@ def load_metadata(meta_path: str, sep: Optional[str] = None, on_bad_lines: str =
     df["gauge_lon"] = pd.to_numeric(df["gauge_lon"], errors="coerce")
     df["gauge_lat"] = pd.to_numeric(df["gauge_lat"], errors="coerce")
     df["area_km2"] = pd.to_numeric(df["area_km2"], errors="coerce")
+    # USGS drain_area_va is in sq miles — convert to sq km
+    df["area_km2"] = df["area_km2"] * 2.58999
     df = df.dropna(subset=["gauge_lon", "gauge_lat", "area_km2"])
     return df.set_index("gauge_id")
 
@@ -232,6 +238,24 @@ def main() -> int:
 
     # Load metadata (lon/lat/area)
     meta = load_metadata(args.metadata, sep=args.meta_sep, on_bad_lines=args.on_bad_lines)
+    print(f"Loaded metadata for {len(meta)} sites.")
+
+    # Optional site list filter
+    if args.site_list and os.path.exists(args.site_list):
+        with open(args.site_list, "r") as f:
+            wanted = {line.strip() for line in f if line.strip() and not line.startswith("#")}
+        meta = meta[meta.index.isin(wanted)]
+        print(f"Filtered to {len(meta)} sites from site list.")
+
+    # Optional bbox filter
+    if args.bbox:
+        min_lon, min_lat, max_lon, max_lat = args.bbox
+        before = len(meta)
+        meta = meta[
+            (meta["gauge_lon"] >= min_lon) & (meta["gauge_lon"] <= max_lon) &
+            (meta["gauge_lat"] >= min_lat) & (meta["gauge_lat"] <= max_lat)
+        ]
+        print(f"Bbox filter: {before} -> {len(meta)} sites within [{min_lon},{min_lat},{max_lon},{max_lat}]")
 
     # (optional) cleanup existing files in range
     if args.overwrite and start and end:
