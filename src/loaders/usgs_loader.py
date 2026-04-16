@@ -62,12 +62,10 @@ class USGSLoader(BaseLoader):
             "site_no": "gauge_id",
             "dec_lat_va": "gauge_lat",
             "dec_long_va": "gauge_lon",
-            "drain_area_va": "area_km2",
+            "drain_area_va": "area_sq_mi",
         })
-        # PR#15 fix: drain_area_va is in sq miles, convert to sq km
-        df["area_km2"] = df["area_km2"] * 2.58999
-        
-        required = ["gauge_id", "gauge_lat", "gauge_lon", "area_km2"]
+
+        required = ["gauge_id", "gauge_lat", "gauge_lon", "area_sq_mi"]
         missing = [c for c in required if c not in df.columns]
         if missing:
             print(f"[USGSLoader] Missing columns: {missing}")
@@ -92,10 +90,8 @@ class USGSLoader(BaseLoader):
                 "site_no": "gauge_id",
                 "dec_lat_va": "gauge_lat",
                 "dec_long_va": "gauge_lon",
-                "drain_area_va": "area_km2",
+                "drain_area_va": "area_sq_mi",
             })[required].dropna()
-            # PR#15 fix: drain_area_va is in sq miles, convert to sq km
-            all_sites["area_km2"] = all_sites["area_km2"] * 2.58999
             current = set(df["gauge_id"])
             candidates = all_sites[~all_sites["gauge_id"].isin(current)]
             sample_n = min(add_random, len(candidates))
@@ -104,7 +100,8 @@ class USGSLoader(BaseLoader):
 
         min_area = float(scfg.get("min_area_km2", 0.0))
         if min_area > 0:
-            df = df[df["area_km2"] >= min_area]
+            # min_area_km2 config is in km²; convert area_sq_mi to km² for comparison
+            df = df[(df["area_sq_mi"] * 2.58999) >= min_area]
 
         bbox = scfg.get("bbox")
         if bbox and len(bbox) == 4:
@@ -294,8 +291,8 @@ class USGSLoader(BaseLoader):
                 meta = self.gauge_metadata.loc[site_id]
             except KeyError:
                 return (None, "missing_metadata", site_id)
-            lon, lat, area_km2 = float(meta["gauge_lon"]), float(meta["gauge_lat"]), float(meta["area_km2"])
-            if not np.isfinite(area_km2) or area_km2 <= 0:
+            lon, lat, area_sq_mi = float(meta["gauge_lon"]), float(meta["gauge_lat"]), float(meta["area_sq_mi"])
+            if not np.isfinite(area_sq_mi) or area_sq_mi <= 0:
                 return (None, "invalid_area", site_id)
             attempt = 0
             sid = site_id.zfill(8)
@@ -311,7 +308,8 @@ class USGSLoader(BaseLoader):
                     cfs = float(df.iloc[0][cols[0]])
                     if not np.isfinite(cfs):
                         return (None, "nonfinite_cfs", site_id)
-                    area_m2 = area_km2 * 1e6
+                    # Square miles -> square meters
+                    area_m2 = area_sq_mi * 2.58999e6
                     mm_day = (cfs * 0.0283168 * 86400.0 / area_m2) * 1000.0
                     if mm_day < -500 or mm_day > 500:
                         return (None, "large_magnitude_flow", site_id)
@@ -437,8 +435,8 @@ class USGSLoader(BaseLoader):
                 meta = self.gauge_metadata.loc[site_id]
             except KeyError:
                 return (None, "missing_metadata", site_id)
-            lon, lat, area_km2 = float(meta["gauge_lon"]), float(meta["gauge_lat"]), float(meta["area_km2"])
-            if not np.isfinite(area_km2) or area_km2 <= 0:
+            lon, lat, area_sq_mi = float(meta["gauge_lon"]), float(meta["gauge_lat"]), float(meta["area_sq_mi"])
+            if not np.isfinite(area_sq_mi) or area_sq_mi <= 0:
                 return (None, "invalid_area", site_id)
 
             attempt = 0
@@ -458,7 +456,8 @@ class USGSLoader(BaseLoader):
                     if not np.isfinite(cfs):
                         return (None, "nonfinite_cfs", site_id)
 
-                    area_m2 = area_km2 * 1e6
+                    # Square miles -> square meters
+                    area_m2 = area_sq_mi * 2.58999e6
                     mm_15min = (cfs * 0.0283168 * 900.0 / area_m2) * 1000.0
                     if mm_15min < -10 or mm_15min > 100:
                         return (None, "large_magnitude_flow", site_id)
@@ -516,8 +515,8 @@ class USGSLoader(BaseLoader):
                 meta = self.gauge_metadata.loc[site_id]
             except KeyError:
                 return (None, "missing_metadata", site_id)
-            lon, lat, area_km2 = float(meta["gauge_lon"]), float(meta["gauge_lat"]), float(meta["area_km2"])
-            if not np.isfinite(area_km2) or area_km2 <= 0:
+            lon, lat, area_sq_mi = float(meta["gauge_lon"]), float(meta["gauge_lat"]), float(meta["area_sq_mi"])
+            if not np.isfinite(area_sq_mi) or area_sq_mi <= 0:
                 return (None, "invalid_area", site_id)
 
             attempt = 0
@@ -538,7 +537,8 @@ class USGSLoader(BaseLoader):
                     if not np.isfinite(mean_cfs):
                         return (None, "nonfinite_cfs", site_id)
 
-                    area_m2 = area_km2 * 1e6
+                    # Square miles -> square meters
+                    area_m2 = area_sq_mi * 2.58999e6
                     mm_hour = (mean_cfs * 0.0283168 * 3600.0 / area_m2) * 1000.0
                     if mm_hour < -40 or mm_hour > 400:
                         return (None, "large_magnitude_flow", site_id)
@@ -563,4 +563,3 @@ class USGSLoader(BaseLoader):
                     print(f"[IV] {completed}/{total}")
 
         return self._finalize_results(ts_str, sites, results, failures)
-
