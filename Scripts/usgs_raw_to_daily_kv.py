@@ -80,7 +80,7 @@ def find_flow_column(df: pd.DataFrame) -> Optional[str]:
 def load_metadata(meta_path: str, sep: Optional[str] = None, on_bad_lines: str = "error") -> pd.DataFrame:
     """
     Load and normalize site metadata to columns:
-      gauge_id, gauge_lon, gauge_lat, area_km2
+      gauge_id, gauge_lon, gauge_lat, area_sq_mi
 
     Tries:
       - user-provided sep (if given)
@@ -137,11 +137,11 @@ def load_metadata(meta_path: str, sep: Optional[str] = None, on_bad_lines: str =
         "gauge_lon": "gauge_lon",
         "dec_lat_va": "gauge_lat",
         "gauge_lat": "gauge_lat",
-        "drain_area_va": "area_km2",
-        "area_km2": "area_km2",
+        "drain_area_va": "area_sq_mi",
+        "area_sq_mi": "area_sq_mi",
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-    needed = {"gauge_id", "gauge_lon", "gauge_lat", "area_km2"}
+    needed = {"gauge_id", "gauge_lon", "gauge_lat", "area_sq_mi"}
     missing = needed - set(df.columns)
     if missing:
         raise ValueError(f"Metadata missing columns: {missing}. Have: {df.columns.tolist()}")
@@ -150,10 +150,8 @@ def load_metadata(meta_path: str, sep: Optional[str] = None, on_bad_lines: str =
     df["gauge_id"] = df["gauge_id"].astype(str).str.strip().str.zfill(8)
     df["gauge_lon"] = pd.to_numeric(df["gauge_lon"], errors="coerce")
     df["gauge_lat"] = pd.to_numeric(df["gauge_lat"], errors="coerce")
-    df["area_km2"] = pd.to_numeric(df["area_km2"], errors="coerce")
-    # USGS drain_area_va is in sq miles — convert to sq km
-    df["area_km2"] = df["area_km2"] * 2.58999
-    df = df.dropna(subset=["gauge_lon", "gauge_lat", "area_km2"])
+    df["area_sq_mi"] = pd.to_numeric(df["area_sq_mi"], errors="coerce")
+    df = df.dropna(subset=["gauge_lon", "gauge_lat", "area_sq_mi"])
     return df.set_index("gauge_id")
 
 
@@ -316,7 +314,8 @@ def main() -> int:
         )
 
         # Compute mm/day
-        area_m2 = (pd.to_numeric(df["area_km2"], errors="coerce") * 1e6)
+        # Square miles -> square meters
+        area_m2 = (pd.to_numeric(df["area_sq_mi"], errors="coerce") * 2.58999e6)
         cfs = pd.to_numeric(df[flow_col], errors="coerce")
         mm_day = (cfs * 0.0283168 * 86400.0 / area_m2) * 1000.0
         df["mm_day"] = mm_day

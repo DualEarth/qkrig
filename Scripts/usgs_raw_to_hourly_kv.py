@@ -163,7 +163,7 @@ def load_metadata(
 ) -> pd.DataFrame:
     """
     Load and normalize site metadata to columns:
-      gauge_id, gauge_lon, gauge_lat, area_km2
+      gauge_id, gauge_lon, gauge_lat, area_sq_mi
     """
     import csv
 
@@ -214,11 +214,11 @@ def load_metadata(
         "gauge_lon": "gauge_lon",
         "dec_lat_va": "gauge_lat",
         "gauge_lat": "gauge_lat",
-        "drain_area_va": "area_km2",
-        "area_km2": "area_km2",
+        "drain_area_va": "area_sq_mi",
+        "area_sq_mi": "area_sq_mi",
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-    needed = {"gauge_id", "gauge_lon", "gauge_lat", "area_km2"}
+    needed = {"gauge_id", "gauge_lon", "gauge_lat", "area_sq_mi"}
     missing = needed - set(df.columns)
     if missing:
         raise ValueError(f"Metadata missing columns: {missing}. Have: {df.columns.tolist()}")
@@ -226,9 +226,7 @@ def load_metadata(
     df["gauge_id"] = df["gauge_id"].astype(str).str.strip()
     df["gauge_lon"] = pd.to_numeric(df["gauge_lon"], errors="coerce")
     df["gauge_lat"] = pd.to_numeric(df["gauge_lat"], errors="coerce")
-    df["area_km2"] = pd.to_numeric(df["area_km2"], errors="coerce")
-    # USGS drain_area_va is in sq miles — convert to sq km
-    df["area_km2"] = df["area_km2"] * 2.58999
+    df["area_sq_mi"] = pd.to_numeric(df["area_sq_mi"], errors="coerce")
     df = df.dropna(subset=["gauge_lon", "gauge_lat"])
     return df.set_index("gauge_id")
 
@@ -438,7 +436,8 @@ def main() -> int:
         )
 
         # Compute mm/hr from mean CFS
-        area_m2 = pd.to_numeric(hourly["area_km2"], errors="coerce") * 1e6
+        # Square miles -> square meters
+        area_m2 = pd.to_numeric(hourly["area_sq_mi"], errors="coerce") * 2.58999e6
         mm_hr = (hourly["mean_cfs"] * 0.0283168 * 3600.0 / area_m2) * 1000.0
         hourly["mm_hr"] = mm_hr
         hourly["ok_flag"] = (
@@ -481,7 +480,7 @@ def main() -> int:
                 else:
                     if row["n_readings"] < min_readings:
                         reason = f"insufficient_readings (n={int(row['n_readings'])} < {min_readings})"
-                    elif pd.isna(row.get("area_km2")):
+                    elif pd.isna(row.get("area_sq_mi")):
                         reason = "missing_drainage_area"
                     elif pd.isna(row["mm_hr"]):
                         reason = "missing"
