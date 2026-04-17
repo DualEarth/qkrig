@@ -34,10 +34,10 @@ class USGSLoader:
             "site_no": "gauge_id",
             "dec_lat_va": "gauge_lat",
             "dec_long_va": "gauge_lon",
-            "drain_area_va": "area_km2"
+            "drain_area_va": "area_sq_mi"
         })
 
-        df = df[["gauge_id", "gauge_lat", "gauge_lon", "area_km2"]]
+        df = df[["gauge_id", "gauge_lat", "gauge_lon", "area_sq_mi"]]
         df.dropna(inplace=True)
 
         if self.site_list_file and os.path.exists(self.site_list_file):
@@ -53,9 +53,9 @@ class USGSLoader:
                 "site_no": "gauge_id",
                 "dec_lat_va": "gauge_lat",
                 "dec_long_va": "gauge_lon",
-                "drain_area_va": "area_km2"
+                "drain_area_va": "area_sq_mi"
             })
-            all_metadata = all_metadata[["gauge_id", "gauge_lat", "gauge_lon", "area_km2"]].dropna()
+            all_metadata = all_metadata[["gauge_id", "gauge_lat", "gauge_lon", "area_sq_mi"]].dropna()
             current_sites = set(df["gauge_id"])
             candidate_sites = all_metadata[~all_metadata["gauge_id"].isin(current_sites)]
             sample_size = min(self.add_random_sites, len(candidate_sites))
@@ -90,8 +90,9 @@ class USGSLoader:
                         streamflow_cfs = df.iloc[0][discharge_col[0]]
 
                         # Convert cfs → mm/day
-                        area_km2 = row["area_km2"]
-                        area_m2 = area_km2 * 1e6
+                        area_sq_mi = row["area_sq_mi"]
+                        # Square miles -> square meters
+                        area_m2 = area_sq_mi * 2.58999e6
                         streamflow_mm = (streamflow_cfs * 0.0283168 * 86400 / area_m2) * 1000
 
                         results.append((
