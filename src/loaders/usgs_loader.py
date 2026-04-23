@@ -316,16 +316,7 @@ class USGSLoader(BaseLoader):
                     cols = [c for c in df.columns if "00060" in c and "Mean" in c]
                     if not cols:
                         return (None, "missing_mean_col", site_id)
-<<<<<<< Updated upstream
-
-                    try:
-                        cfs = float(df.iloc[0][cols[0]])
-                    except Exception:
-                        return (None, "bad_value", site_id)
-
-=======
                     cfs = float(df.iloc[0][cols[0]])
->>>>>>> Stashed changes
                     if not np.isfinite(cfs) or cfs < 0:
                         return (None, "nonfinite_cfs", site_id)
                     # Square miles -> square meters
