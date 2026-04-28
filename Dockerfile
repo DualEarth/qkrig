@@ -38,7 +38,10 @@ ENV OMP_NUM_THREADS=1 \
     MKL_NUM_THREADS=1 \
     OPENBLAS_NUM_THREADS=1 \
     NUMEXPR_NUM_THREADS=1 \
-    MPLBACKEND=Agg
+    MPLBACKEND=Agg \
+    HOME=/tmp \
+    MPLCONFIGDIR=/tmp/.config/matplotlib \
+    MAX_PROCS=4
 
 # Entry point: the hourly dispatch script.
 # Override CMD to pass [CONFIG] [START_DATE] [END_DATE]:
